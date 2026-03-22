@@ -245,8 +245,10 @@ export async function runAgent(systemPrompt: string, userMessage: string): Promi
     const generateStream = client.beta.messages.stream({
       model: outputModel,
       max_tokens: 64000,
-      system: systemPrompt,
-      messages: [{ role: 'user', content: `${userMessage}\n\n--- KEYWORD DATA (from DFS research) ---\n${collectedData}` }],
+      system: systemPrompt + '\n\nCRITICAL: Your response must be ONLY a raw JSON object. Start with { and end with }. No markdown, no code fences, no text before or after. Output pure JSON only.',
+      messages: [
+        { role: 'user', content: `${userMessage}\n\n--- KEYWORD DATA (from DFS research) ---\n${collectedData}\n\nRemember: Output ONLY the JSON object. No text, no markdown, no explanation. Start with { and end with }.` },
+      ],
       betas: ['mcp-client-2025-11-20'],
     });
 
@@ -258,6 +260,40 @@ export async function runAgent(systemPrompt: string, userMessage: string): Promi
   } finally {
     await closeMcpClient(mcpClient);
   }
+}
+
+// Generate-only (no research phase) — for sitemap where keyword data is already available
+export async function generateOnly(
+  systemPrompt: string,
+  userMessage: string,
+): Promise<AgentResult> {
+  if (!process.env.ANTHROPIC_API_KEY) {
+    throw new AgentError('ANTHROPIC_API_KEY not set', 'missing_api_key', 'Set ANTHROPIC_API_KEY environment variable.');
+  }
+
+  const client = new Anthropic();
+  const outputModel = getOutputModel();
+
+  console.log(`\n[Agent-GenerateOnly] Starting with ${outputModel}`);
+
+  let fullText = '';
+  const stream = client.messages.stream({
+    model: outputModel,
+    max_tokens: 64000,
+    system: systemPrompt + '\n\nCRITICAL: Your response must be ONLY a raw JSON object. Start with { and end with }. No markdown, no code fences, no text before or after. Output pure JSON only.',
+    messages: [
+      {
+        role: 'user',
+        content: `${userMessage}\n\nRemember: Output ONLY the JSON object. No text, no markdown, no explanation. Start with { and end with }.`,
+      },
+    ],
+  });
+
+  const response = await stream.on('text', (text) => {
+    fullText += text;
+  }).finalMessage();
+
+  return { success: true, result: fullText, toolsUsed: [] };
 }
 
 // Streaming agent
@@ -366,8 +402,10 @@ export async function streamAgent(
     const stream = client.beta.messages.stream({
       model: outputModel,
       max_tokens: 16000,
-      system: systemPrompt,
-      messages: [{ role: 'user', content: `${userMessage}\n\n--- KEYWORD DATA (from DFS research) ---\n${collectedData}` }],
+      system: systemPrompt + '\n\nCRITICAL: Your response must be ONLY a raw JSON object. Start with { and end with }. No markdown, no code fences, no text before or after. Output pure JSON only.',
+      messages: [
+        { role: 'user', content: `${userMessage}\n\n--- KEYWORD DATA (from DFS research) ---\n${collectedData}\n\nRemember: Output ONLY the JSON object. No text, no markdown, no explanation. Start with { and end with }.` },
+      ],
       betas: ['mcp-client-2025-11-20'],
     });
 

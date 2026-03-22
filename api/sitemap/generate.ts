@@ -1,5 +1,5 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
-import { runAgent, AgentError } from '../_lib/agent.js';
+import { generateOnly, AgentError } from '../_lib/agent.js';
 import { getSitemapPrompt } from '../_lib/prompts.js';
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
@@ -19,7 +19,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       `\nKeyword Map Data:\n${typeof keywordData === 'string' ? keywordData : JSON.stringify(keywordData, null, 2)}`,
     ].join('\n');
 
-    const result = await runAgent(systemPrompt, userMessage);
+    const result = await generateOnly(systemPrompt, userMessage);
     res.json(result);
   } catch (err) {
     console.error('Sitemap generation error:', err);

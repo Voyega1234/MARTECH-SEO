@@ -7,7 +7,10 @@
       "Bash(git commit:*)",
       "Bash(git fetch:*)",
       "Bash(git push:*)",
-      "Bash(npx tsc:*)"
+      "Bash(npx tsc:*)",
+      "Bash(node -e \":*)",
+      "Bash(grep -r \"tool_result\\\\|ToolResultBlockParam\" /Users/waveconvertcake/Desktop/MARTECH-SEO --include=*.ts)",
+      "Bash(grep -r \"keyword_volume\\\\|get_keyword\\\\|dfx\\\\|dfs_\" /Users/waveconvertcake/Desktop/MARTECH-SEO --include=*.ts --include=*.md)"
     ]
   }
 }

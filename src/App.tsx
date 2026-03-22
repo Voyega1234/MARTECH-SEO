@@ -7,6 +7,79 @@ import { Sidebar } from './components/Sidebar';
 import { KeywordTable } from './components/KeywordTable';
 import { SitemapTable } from './components/SitemapTable';
 import { generateKeywords, generateSitemap } from './services/api';
+
+// Extract valid keyword JSON from agent output (handles preamble text, markdown, etc.)
+function extractKeywordJSON(text: string): string | null {
+  // Try parsing the whole thing first
+  try {
+    const parsed = JSON.parse(text);
+    if (parsed.product_lines) return text;
+  } catch { /* not pure JSON */ }
+
+  // Find the outermost JSON object that has "product_lines"
+  // Look for { that starts the real JSON (not inside markdown code blocks)
+  const lines = text.split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const trimmed = lines[i].trim();
+    // Skip lines inside markdown code blocks
+    if (trimmed === '```json' || trimmed === '```') continue;
+    // Look for a line that starts with { and try to parse from there
+    if (trimmed.startsWith('{')) {
+      const candidate = lines.slice(i).join('\n');
+      // Find the matching closing brace
+      let depth = 0;
+      let end = -1;
+      for (let j = 0; j < candidate.length; j++) {
+        if (candidate[j] === '{') depth++;
+        else if (candidate[j] === '}') {
+          depth--;
+          if (depth === 0) { end = j; break; }
+        }
+      }
+      if (end > 0) {
+        const jsonStr = candidate.slice(0, end + 1);
+        try {
+          const parsed = JSON.parse(jsonStr);
+          if (parsed.product_lines) return jsonStr;
+        } catch { /* try next */ }
+      }
+    }
+  }
+  return null;
+}
+
+function extractSitemapJSON(text: string): string | null {
+  try {
+    const parsed = JSON.parse(text);
+    if (parsed.sections) return text;
+  } catch { /* not pure JSON */ }
+
+  const lines = text.split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const trimmed = lines[i].trim();
+    if (trimmed === '```json' || trimmed === '```') continue;
+    if (trimmed.startsWith('{')) {
+      const candidate = lines.slice(i).join('\n');
+      let depth = 0;
+      let end = -1;
+      for (let j = 0; j < candidate.length; j++) {
+        if (candidate[j] === '{') depth++;
+        else if (candidate[j] === '}') {
+          depth--;
+          if (depth === 0) { end = j; break; }
+        }
+      }
+      if (end > 0) {
+        const jsonStr = candidate.slice(0, end + 1);
+        try {
+          const parsed = JSON.parse(jsonStr);
+          if (parsed.sections) return jsonStr;
+        } catch { /* try next */ }
+      }
+    }
+  }
+  return null;
+}
 import {
   createProject,
   saveKeywordResult,
@@ -139,7 +212,9 @@ export default function App() {
     setActivePanel(stepId as ActivePanel);
   };
 
-  const handleGenerateKeywords = async (e: React.FormEvent) => {
+  const log = (msg: string) => setStreamText((prev) => prev + msg);
+
+  const handleGenerate = async (e: React.FormEvent) => {
     e.preventDefault();
     setGenerating('keywords');
     setStreamText('');
@@ -147,6 +222,8 @@ export default function App() {
     setError('');
 
     try {
+      log('> Connected to AI agent\n');
+
       // Create project in Supabase if not already saved
       let currentProjectId = projectId;
       if (!currentProjectId) {
@@ -154,54 +231,109 @@ export default function App() {
           const project = await createProject(formData);
           currentProjectId = project.id;
           setProjectId(project.id);
+          log('> Project saved to database\n');
         } catch (err) {
           console.error('Failed to save project:', err);
         }
       }
 
-      const result = await generateKeywords(formData);
-      setKeywordResult(result.result);
-      setGenerating(null);
-      setActivePanel('keywords');
+      // ── Step 1: Generate Keywords ──
+      log('> Starting keyword research with DataForSEO tools...\n');
+
+      const MAX_ATTEMPTS = 3;
+      let keywordJSON: string | null = null;
+
+      for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+        if (attempt > 1) {
+          log(`> Keyword attempt ${attempt}/${MAX_ATTEMPTS}: Re-generating...\n`);
+        }
+
+        log('> Researching keywords and search volumes...\n');
+        const result = await generateKeywords(formData);
+        log('> Validating keyword output format...\n');
+        keywordJSON = extractKeywordJSON(result.result);
+
+        if (keywordJSON) {
+          log('> Keyword map generated successfully.\n');
+          break;
+        }
+
+        console.warn(`[Keywords] Attempt ${attempt}: Invalid JSON format, retrying...`);
+        log(`> Invalid keyword format received. ${attempt < MAX_ATTEMPTS ? 'Retrying...' : 'Max retries reached.'}\n`);
+      }
+
+      if (!keywordJSON) {
+        setError('Failed to generate valid keyword data after multiple attempts. Please try again.');
+        setGenerating(null);
+        return;
+      }
+
+      setKeywordResult(keywordJSON);
 
       // Save keywords to Supabase
       if (currentProjectId) {
         try {
-          await saveKeywordResult(currentProjectId, result.result);
-          setProjects(await listProjects());
+          await saveKeywordResult(currentProjectId, keywordJSON);
+          log('> Keywords saved to database\n');
         } catch (err) {
           console.error('Failed to save keywords:', err);
         }
       }
-    } catch (err) {
-      setError((err as Error).message);
-      setGenerating(null);
-    }
-  };
 
-  const handleGenerateSitemap = async () => {
-    setGenerating('sitemap');
-    setStreamText('');
-    setActiveTools([]);
-    setError('');
+      // ── Step 2: Generate Sitemap ──
+      setGenerating('sitemap');
+      log('\n> Starting sitemap generation...\n');
 
-    const businessContext = `${formData.businessName} — ${formData.businessDescription}`;
+      const businessContext = `${formData.businessName} — ${formData.businessDescription}`;
+      let sitemapJSON: string | null = null;
 
-    try {
-      const result = await generateSitemap(keywordResult, businessContext);
-      setSitemapResult(result.result);
-      setGenerating(null);
-      setActivePanel('sitemap');
+      for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+        if (attempt > 1) {
+          log(`> Sitemap attempt ${attempt}/${MAX_ATTEMPTS}: Re-generating...\n`);
+        }
+
+        log('> Building sitemap structure from keyword groups...\n');
+        const result = await generateSitemap(keywordJSON, businessContext);
+        log('> Validating sitemap output format...\n');
+        sitemapJSON = extractSitemapJSON(result.result);
+
+        if (sitemapJSON) {
+          log('> Sitemap generated successfully.\n');
+          break;
+        }
+
+        console.warn(`[Sitemap] Attempt ${attempt}: Invalid JSON format, retrying...`);
+        log(`> Invalid sitemap format received. ${attempt < MAX_ATTEMPTS ? 'Retrying...' : 'Max retries reached.'}\n`);
+      }
+
+      if (!sitemapJSON) {
+        setError('Failed to generate valid sitemap after multiple attempts. Please try again.');
+        setGenerating(null);
+        return;
+      }
+
+      setSitemapResult(sitemapJSON);
 
       // Save sitemap to Supabase
-      if (projectId) {
+      if (currentProjectId) {
         try {
-          await saveSitemapResult(projectId, result.result);
-          setProjects(await listProjects());
+          await saveSitemapResult(currentProjectId, sitemapJSON);
+          log('> Sitemap saved to database\n');
         } catch (err) {
           console.error('Failed to save sitemap:', err);
         }
       }
+
+      // Refresh project list
+      try {
+        setProjects(await listProjects());
+      } catch (err) {
+        console.error('Failed to refresh projects:', err);
+      }
+
+      log('\n> All done! Redirecting to results...\n');
+      setGenerating(null);
+      setActivePanel('keywords');
     } catch (err) {
       setError((err as Error).message);
       setGenerating(null);
@@ -393,7 +525,7 @@ export default function App() {
                   </div>
                   <div>
                     <div className="text-[22px] font-semibold text-[#1d1d1f] tracking-[-0.5px]">
-                      {generating === 'keywords' ? 'Generating Keyword Map' : 'Generating Sitemap'}
+                      {generating === 'keywords' ? 'Generating Keyword Map' : 'Generating Keyword Sitemap'}
                     </div>
                     <div className="text-[13px] text-[#6e6e73] mt-0.5 flex items-center gap-2">
                       <span>AI is researching and building your SEO plan</span>
@@ -409,9 +541,9 @@ export default function App() {
                 <div className="flex items-center gap-6 py-3 px-4 bg-white rounded-xl border border-[#e8e8ed]">
                   {[
                     { label: 'Connecting', done: elapsed >= 2 },
-                    { label: 'Researching', done: elapsed >= 15 },
-                    { label: 'Analyzing', done: elapsed >= 60 },
-                    { label: 'Finalizing', done: false },
+                    { label: 'Keywords', done: generating === 'sitemap' || (generating === 'keywords' && elapsed >= 60) },
+                    { label: 'Sitemap', done: generating === 'sitemap' && elapsed >= 30 },
+                    { label: 'Done', done: false },
                   ].map((step, i, arr) => {
                     const isActive = !step.done && (i === 0 || arr[i - 1].done);
                     return (
@@ -472,18 +604,17 @@ export default function App() {
                     <span className="text-[11px] text-white/30 font-mono">execution logs</span>
                   </div>
                   <pre className="text-[12px] text-[#a1a1a6] whitespace-pre-wrap font-mono leading-relaxed">
-                    {elapsed < 2 && (
+                    {streamText || (
                       <span className="inline-flex items-center gap-2">
                         <span className="inline-block w-1.5 h-3.5 bg-[#0071e3] animate-pulse rounded-sm" />
                         <span className="text-white/40">Connecting to agent...</span>
                       </span>
                     )}
-                    {elapsed >= 2 && elapsed < 15 && '> Connected to AI agent\n> Starting keyword research with DataForSEO tools...\n'}
-                    {elapsed >= 15 && elapsed < 60 && '> Connected to AI agent\n> Starting keyword research with DataForSEO tools...\n> Researching keywords and search volumes...\n> Analyzing search intent and competition...\n'}
-                    {elapsed >= 60 && '> Connected to AI agent\n> Starting keyword research with DataForSEO tools...\n> Researching keywords and search volumes...\n> Analyzing search intent and competition...\n> Generating structured keyword map...\n> Building topic pillars and keyword groups...\n'}
-                    <span className="inline-flex items-center gap-1 mt-1">
-                      <span className="inline-block w-1.5 h-3.5 bg-[#0071e3] animate-pulse rounded-sm" />
-                    </span>
+                    {generating && (
+                      <span className="inline-flex items-center gap-1 mt-1">
+                        <span className="inline-block w-1.5 h-3.5 bg-[#0071e3] animate-pulse rounded-sm" />
+                      </span>
+                    )}
                   </pre>
                 </div>
               </div>
@@ -549,7 +680,7 @@ export default function App() {
                   </div>
                 )}
 
-                <form onSubmit={handleGenerateKeywords}>
+                <form onSubmit={handleGenerate}>
                   <div className="grid grid-cols-2 gap-4 max-w-[840px]">
                     {/* Company Details */}
                     <div className="col-span-2 text-[11px] font-semibold text-[#aeaeb2] tracking-[0.8px] uppercase pt-1">
@@ -666,7 +797,7 @@ export default function App() {
                         type="submit"
                         className="inline-flex items-center gap-1.5 px-5 py-[9px] rounded-lg text-[13px] font-medium text-white bg-[#0071e3] border-none hover:bg-[#0077ed] active:scale-[0.98] transition-all cursor-pointer"
                       >
-                        Save & Generate Keywords
+                        Generate Keywords & Sitemap
                         <svg viewBox="0 0 16 16" fill="currentColor" className="w-3.5 h-3.5">
                           <path d="M12.78 6.22a.75.75 0 0 1 0 1.06l-4.25 4.25a.75.75 0 0 1-1.06 0L3.22 7.28a.75.75 0 0 1 1.06-1.06L8 9.94l3.72-3.72a.75.75 0 0 1 1.06 0z" transform="rotate(-90 8 8)" />
                         </svg>
@@ -691,17 +822,6 @@ export default function App() {
                       Topical authority map · {keywordGroupCount} groups
                     </div>
                   </div>
-                  {!hasSitemap && (
-                    <button
-                      onClick={handleGenerateSitemap}
-                      className="shrink-0 inline-flex items-center gap-1.5 px-4 py-[8px] rounded-lg text-[13px] font-medium text-white bg-[#0071e3] border-none hover:bg-[#0077ed] active:scale-[0.98] transition-all cursor-pointer"
-                    >
-                      Generate Sitemap
-                      <svg viewBox="0 0 16 16" fill="currentColor" className="w-3.5 h-3.5">
-                        <path d="M12.78 6.22a.75.75 0 0 1 0 1.06l-4.25 4.25a.75.75 0 0 1-1.06 0L3.22 7.28a.75.75 0 0 1 1.06-1.06L8 9.94l3.72-3.72a.75.75 0 0 1 1.06 0z" transform="rotate(-90 8 8)" />
-                      </svg>
-                    </button>
-                  )}
                 </div>
               </div>
 

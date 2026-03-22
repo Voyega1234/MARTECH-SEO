@@ -28,15 +28,37 @@ interface KeywordData {
 }
 
 function tryParseJSON(text: string): KeywordData | null {
+  // Try direct parse first
   try {
-    const jsonMatch = text.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) return null;
-    const parsed = JSON.parse(jsonMatch[0]);
+    const parsed = JSON.parse(text);
     if (parsed.product_lines) return parsed;
-    return null;
-  } catch {
-    return null;
+  } catch { /* not pure JSON */ }
+
+  // Find the JSON object with "product_lines" by brace-matching
+  const lines = text.split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const trimmed = lines[i].trim();
+    if (trimmed === '```json' || trimmed === '```') continue;
+    if (trimmed.startsWith('{')) {
+      const candidate = lines.slice(i).join('\n');
+      let depth = 0;
+      let end = -1;
+      for (let j = 0; j < candidate.length; j++) {
+        if (candidate[j] === '{') depth++;
+        else if (candidate[j] === '}') {
+          depth--;
+          if (depth === 0) { end = j; break; }
+        }
+      }
+      if (end > 0) {
+        try {
+          const parsed = JSON.parse(candidate.slice(0, end + 1));
+          if (parsed.product_lines) return parsed;
+        } catch { /* try next */ }
+      }
+    }
   }
+  return null;
 }
 
 interface FlatRow {
