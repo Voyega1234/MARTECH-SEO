@@ -241,7 +241,7 @@ export async function runAgent(systemPrompt: string, userMessage: string): Promi
     const generateResponse = await callClaudeWithRetry(
       () => client.beta.messages.create({
         model: outputModel,
-        max_tokens: 16000,
+        max_tokens: 64000,
         system: systemPrompt,
         messages: [{ role: 'user', content: `${userMessage}\n\n--- KEYWORD DATA (from DFS research) ---\n${collectedData}` }],
         betas: ['mcp-client-2025-11-20'],

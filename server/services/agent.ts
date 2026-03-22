@@ -357,7 +357,7 @@ export async function runAgent(
   const generateResponse = await callClaudeWithRetry(
     () => client.beta.messages.create({
       model: outputModel,
-      max_tokens: 16000,
+      max_tokens: 64000,
       system: systemPrompt,
       messages: [
         {
@@ -520,7 +520,7 @@ export async function streamAgent(
 
     const stream = client.beta.messages.stream({
       model: outputModel,
-      max_tokens: 16000,
+      max_tokens: 64000,
       system: systemPrompt,
       messages: [
         {
