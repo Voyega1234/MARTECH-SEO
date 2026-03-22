@@ -192,7 +192,7 @@ export async function runAgent(systemPrompt: string, userMessage: string): Promi
 
     let messages: any[] = [{ role: 'user', content: userMessage }];
     let loopCount = 0;
-    const maxLoops = 15;
+    const maxLoops = 8;
 
     const researchSystemPrompt = systemPrompt + `\n\nIMPORTANT: You are in RESEARCH PHASE. Your job is to gather keyword data using DFS tools. Do NOT produce the final JSON output yet. Just call the necessary tools to collect keyword and volume data. Be efficient — batch queries, avoid duplicate calls, aim for 5-8 tool calls total.`;
 
@@ -276,7 +276,7 @@ export async function streamAgent(
 
     let messages: any[] = [{ role: 'user', content: userMessage }];
     let loopCount = 0;
-    const maxLoops = 15;
+    const maxLoops = 8;
     let consecutiveFailedLoops = 0;
 
     const researchSystemPrompt = systemPrompt + `\n\nIMPORTANT: You are in RESEARCH PHASE. Your job is to gather keyword data using DFS tools. Do NOT produce the final JSON output yet. Just call the necessary tools to collect keyword and volume data. Be efficient — batch queries, avoid duplicate calls, aim for 5-8 tool calls total.`;
