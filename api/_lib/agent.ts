@@ -176,8 +176,8 @@ async function callClaudeWithRetry<T>(fn: () => Promise<T>, label: string, maxRe
 }
 
 // Time budget: stop research after this many seconds, leave rest for generation
-const RESEARCH_DEADLINE_MS = 200_000; // 200s for research
-const TOTAL_DEADLINE_MS = 280_000;    // 280s hard limit (leave 20s buffer before Vercel 300s)
+const RESEARCH_DEADLINE_MS = 600_000; // 600s for research
+const TOTAL_DEADLINE_MS = 750_000;    // 750s hard limit (leave 50s buffer before Vercel 800s)
 
 // Non-streaming agent
 export async function runAgent(systemPrompt: string, userMessage: string): Promise<AgentResult> {
