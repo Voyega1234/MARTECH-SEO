@@ -451,14 +451,17 @@ export async function streamAgent(
       let response;
       try {
         response = await callClaudeWithRetry(
-          () => client.beta.messages.create({
-            model: RESEARCH_MODEL,
-            max_tokens: 4000,
-            system: researchSystemPrompt,
-            messages,
-            tools,
-            betas: ['mcp-client-2025-11-20'],
-          }),
+          async () => {
+            const s = client.beta.messages.stream({
+              model: RESEARCH_MODEL,
+              max_tokens: 4000,
+              system: researchSystemPrompt,
+              messages,
+              tools,
+              betas: ['mcp-client-2025-11-20'],
+            });
+            return s.finalMessage();
+          },
           `Stream-Research-Loop-${loopCount}`
         );
       } catch (err) {
