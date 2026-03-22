@@ -3,7 +3,11 @@
     "allow": [
       "Bash(git ls-tree:*)",
       "Bash(git rm:*)",
-      "Bash(git add:*)"
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git fetch:*)",
+      "Bash(git push:*)",
+      "Bash(npx tsc:*)"
     ]
   }
 }

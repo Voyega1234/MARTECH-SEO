@@ -87,6 +87,13 @@ keywordRouter.post('/stream', async (req: Request, res: Response) => {
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no');
+    res.setHeader('Transfer-Encoding', 'chunked');
+    res.flushHeaders();
+
+    // Disable TCP buffering (Nagle's algorithm) so small writes are sent immediately
+    res.socket?.setNoDelay(true);
+    res.socket?.setTimeout(0);
 
     // Handle client disconnect
     let clientDisconnected = false;
@@ -95,23 +102,37 @@ keywordRouter.post('/stream', async (req: Request, res: Response) => {
       console.log('[Stream] Client disconnected');
     });
 
+    const send = (data: string) => {
+      if (clientDisconnected) return;
+      const ok = res.write(data);
+      if (typeof (res as any).flush === 'function') (res as any).flush();
+      // Log every write to confirm callbacks are firing
+      const preview = data.slice(0, 80).replace(/\n/g, '\\n');
+      console.log(`[keywords-send] write=${ok} len=${data.length} | ${preview}`);
+    };
+
+    // Send initial event immediately to confirm connection is live
+    send(`data: ${JSON.stringify({ type: 'status', content: '[Connected to agent...]\n' })}\n\n`);
+
     await streamAgent(systemPrompt, userMessage, {
       onText: (text) => {
-        if (clientDisconnected) return;
-        res.write(`data: ${JSON.stringify({ type: 'text', content: text })}\n\n`);
+        send(`data: ${JSON.stringify({ type: 'text', content: text })}\n\n`);
       },
       onTool: (toolName) => {
-        if (clientDisconnected) return;
-        res.write(`data: ${JSON.stringify({ type: 'tool', name: toolName })}\n\n`);
+        send(`data: ${JSON.stringify({ type: 'tool', name: toolName })}\n\n`);
+      },
+      onStatus: (status) => {
+        send(`data: ${JSON.stringify({ type: 'status', content: status })}\n\n`);
       },
       onDone: (result) => {
         if (clientDisconnected) return;
-        res.write(`data: ${JSON.stringify({ type: 'done', result })}\n\n`);
+        // Result was already streamed via onText during Phase 2.
+        // Just signal completion.
+        send(`data: ${JSON.stringify({ type: 'done', result: '' })}\n\n`);
         res.end();
       },
       onError: (error) => {
-        if (clientDisconnected) return;
-        res.write(`data: ${JSON.stringify({ type: 'error', message: error })}\n\n`);
+        send(`data: ${JSON.stringify({ type: 'error', message: error })}\n\n`);
         res.end();
       },
     });

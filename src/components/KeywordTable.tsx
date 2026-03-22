@@ -1,3 +1,5 @@
+import { useState, useMemo } from 'react';
+
 interface Keyword {
   keyword: string;
   volume: number;
@@ -37,19 +39,26 @@ function tryParseJSON(text: string): KeywordData | null {
   }
 }
 
-function IntentDot({ intent }: { intent: string }) {
-  const color =
-    intent === 'Transactional'
-      ? 'bg-emerald-400'
-      : intent === 'Commercial'
-      ? 'bg-amber-400'
-      : 'bg-blue-400';
-  return (
-    <span className="inline-flex items-center gap-1.5">
-      <span className={`w-1.5 h-1.5 rounded-full ${color}`} />
-      <span className="text-sm text-gray-600 tracking-wide">{intent}</span>
-    </span>
-  );
+interface FlatRow {
+  productLine: string;
+  pillar: string;
+  intent: string;
+  group: string;
+  slug: string;
+  keywords: Keyword[];
+  totalVolume: number;
+}
+
+function getConversionLevel(intent: string): { dot: string; label: string } {
+  if (intent === 'Transactional') return { dot: 'bg-[#34c759]', label: 'High' };
+  if (intent === 'Commercial') return { dot: 'bg-[#ff9f0a]', label: 'Medium' };
+  return { dot: 'bg-[#aeaeb2]', label: 'Low' };
+}
+
+function getTrafficLevel(totalVolume: number): { dot: string; label: string } {
+  if (totalVolume >= 3000) return { dot: 'bg-[#34c759]', label: 'High' };
+  if (totalVolume >= 1000) return { dot: 'bg-[#ff9f0a]', label: 'Medium' };
+  return { dot: 'bg-[#aeaeb2]', label: 'Low' };
 }
 
 function escapeCsv(val: string): string {
@@ -60,7 +69,6 @@ function escapeCsv(val: string): string {
 }
 
 function downloadCsv(filename: string, csvContent: string) {
-  // Add BOM for Excel UTF-8 compatibility
   const blob = new Blob(['\uFEFF' + csvContent], { type: 'text/csv;charset=utf-8;' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
@@ -70,178 +78,231 @@ function downloadCsv(filename: string, csvContent: string) {
   URL.revokeObjectURL(url);
 }
 
+type FilterType = 'all' | 'high-conv' | 'high-traffic';
+
 export function KeywordTable({ data }: { data: string }) {
+  const [search, setSearch] = useState('');
+  const [filter, setFilter] = useState<FilterType>('all');
+
   const parsed = tryParseJSON(data);
 
-  if (!parsed) {
-    return (
-      <pre className="text-sm text-gray-600 whitespace-pre-wrap font-mono leading-relaxed p-6">
-        {data}
-      </pre>
-    );
-  }
-
-  const rows: {
-    productLine: string;
-    pillar: string;
-    intent: string;
-    group: string;
-    slug: string;
-    keyword: string;
-    volume: number;
-    pillarRowSpan: number;
-    groupRowSpan: number;
-    isFirstInPillar: boolean;
-    isFirstInGroup: boolean;
-    productLineRowSpan: number;
-    isFirstInProductLine: boolean;
-  }[] = [];
-
-  for (const pl of parsed.product_lines) {
-    let plKeywordCount = 0;
-    for (const pillar of pl.topic_pillars) {
-      for (const group of pillar.keyword_groups) {
-        plKeywordCount += group.keywords.length;
-      }
-    }
-
-    let isFirstPL = true;
-    for (const pillar of pl.topic_pillars) {
-      let pillarKeywordCount = 0;
-      for (const group of pillar.keyword_groups) {
-        pillarKeywordCount += group.keywords.length;
-      }
-
-      let isFirstPillar = true;
-      for (const group of pillar.keyword_groups) {
-        let isFirstGroup = true;
-        for (const kw of group.keywords) {
+  const allRows: FlatRow[] = useMemo(() => {
+    if (!parsed) return [];
+    const rows: FlatRow[] = [];
+    for (const pl of parsed.product_lines) {
+      for (const pillar of pl.topic_pillars) {
+        for (const group of pillar.keyword_groups) {
+          const totalVolume = group.keywords.reduce((s, k) => s + k.volume, 0);
           rows.push({
             productLine: pl.product_line,
             pillar: pillar.topic_pillar,
             intent: pillar.pillar_intent,
             group: group.keyword_group,
             slug: group.url_slug,
-            keyword: kw.keyword,
-            volume: kw.volume,
-            pillarRowSpan: pillarKeywordCount,
-            groupRowSpan: group.keywords.length,
-            isFirstInPillar: isFirstPillar,
-            isFirstInGroup: isFirstGroup,
-            productLineRowSpan: plKeywordCount,
-            isFirstInProductLine: isFirstPL,
+            keywords: group.keywords,
+            totalVolume,
           });
-          isFirstPillar = false;
-          isFirstGroup = false;
-          isFirstPL = false;
         }
       }
     }
-  }
+    return rows;
+  }, [parsed]);
 
-  const totalVolume = rows.reduce((sum, r) => sum + r.volume, 0);
+  const filteredRows = useMemo(() => {
+    let rows = allRows;
+
+    if (search.trim()) {
+      const q = search.toLowerCase();
+      rows = rows.filter(
+        (r) =>
+          r.group.toLowerCase().includes(q) ||
+          r.pillar.toLowerCase().includes(q) ||
+          r.productLine.toLowerCase().includes(q) ||
+          r.keywords.some((k) => k.keyword.toLowerCase().includes(q))
+      );
+    }
+
+    if (filter === 'high-conv') {
+      rows = rows.filter((r) => r.intent === 'Transactional');
+    } else if (filter === 'high-traffic') {
+      rows = rows.filter((r) => r.totalVolume >= 3000);
+    }
+
+    return rows;
+  }, [allRows, search, filter]);
 
   const exportCsv = () => {
     const header = ['Product Line', 'Topic Pillar', 'Intent', 'Keyword Group', 'URL Slug', 'Keyword', 'Volume'];
-    const csvRows = rows.map((r) => [
-      escapeCsv(r.productLine),
-      escapeCsv(r.pillar),
-      escapeCsv(r.intent),
-      escapeCsv(r.group),
-      escapeCsv(r.slug),
-      escapeCsv(r.keyword),
-      String(r.volume),
-    ].join(','));
+    const csvRows: string[] = [];
+    for (const row of allRows) {
+      for (const kw of row.keywords) {
+        csvRows.push(
+          [
+            escapeCsv(row.productLine),
+            escapeCsv(row.pillar),
+            escapeCsv(row.intent),
+            escapeCsv(row.group),
+            escapeCsv(row.slug),
+            escapeCsv(kw.keyword),
+            String(kw.volume),
+          ].join(',')
+        );
+      }
+    }
     downloadCsv('keyword-map.csv', [header.join(','), ...csvRows].join('\n'));
   };
 
+  if (!parsed) {
+    return (
+      <pre className="text-[12px] text-[#6e6e73] whitespace-pre-wrap font-mono leading-relaxed p-6">
+        {data}
+      </pre>
+    );
+  }
+
+  const intentPill = (intent: string) => {
+    const cls =
+      intent === 'Transactional'
+        ? 'bg-[#e8faf0] text-[#1a7f3c]'
+        : intent === 'Commercial'
+        ? 'bg-[#fff5e6] text-[#b45309]'
+        : 'bg-[#f5f5f7] text-[#6e6e73] border border-[#d2d2d7]';
+    return (
+      <span className={`inline-flex items-center px-2 py-0.5 rounded-[20px] text-[10px] font-semibold tracking-[0.2px] whitespace-nowrap font-mono ${cls}`}>
+        {intent}
+      </span>
+    );
+  };
+
   return (
-    <div className="space-y-4">
-      {/* Stats bar */}
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-6 text-sm text-gray-500 tracking-wide">
-          <span>{parsed.location}</span>
-          <span className="w-px h-3 bg-gray-200" />
-          <span>{rows.length} keywords</span>
-          <span className="w-px h-3 bg-gray-200" />
-          <span>{totalVolume.toLocaleString()} total volume</span>
+    <div className="flex flex-col h-full">
+      {/* Toolbar */}
+      <div className="flex items-center gap-2.5 pb-4 shrink-0">
+        <div className="relative">
+          <svg
+            viewBox="0 0 16 16"
+            fill="currentColor"
+            className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-[#aeaeb2] pointer-events-none"
+          >
+            <path d="M10.68 11.74a6 6 0 0 1-7.922-8.982 6 6 0 0 1 8.982 7.922l3.04 3.04a.749.749 0 0 1-.326 1.275.749.749 0 0 1-.734-.215ZM11.5 7a4.499 4.499 0 1 0-8.997 0A4.499 4.499 0 0 0 11.5 7Z" />
+          </svg>
+          <input
+            type="text"
+            placeholder="Search keyword groups..."
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            className="bg-[#f5f5f7] border border-[#d2d2d7] rounded-lg py-[7px] pl-8 pr-3 text-[13px] text-[#1d1d1f] outline-none w-60 transition-all focus:border-[#0071e3] focus:shadow-[0_0_0_3px_rgba(0,113,227,0.1)]"
+          />
         </div>
-        <button
-          onClick={exportCsv}
-          className="px-3.5 py-1.5 text-sm font-medium text-gray-600 bg-white rounded-lg shadow-[0_0_0_1px_rgba(0,0,0,0.06),0_1px_2px_rgba(0,0,0,0.04)] hover:bg-gray-50 transition-colors"
-        >
-          Export CSV
-        </button>
+
+        <div className="w-px h-5 bg-[#d2d2d7]" />
+
+        {(['all', 'high-conv', 'high-traffic'] as FilterType[]).map((f) => (
+          <button
+            key={f}
+            onClick={() => setFilter(f)}
+            className={`px-3 py-1 rounded-[20px] text-[12px] font-medium border transition-all cursor-pointer ${
+              filter === f
+                ? 'bg-[#0071e3] text-white border-[#0071e3]'
+                : 'bg-white text-[#6e6e73] border-[#d2d2d7] hover:border-[#0071e3] hover:text-[#0071e3]'
+            }`}
+          >
+            {f === 'all' ? 'All' : f === 'high-conv' ? 'High Conv.' : 'High Traffic'}
+          </button>
+        ))}
+
+        <div className="ml-auto flex items-center gap-2">
+          <span className="text-[12px] text-[#aeaeb2] font-mono">{filteredRows.length} groups</span>
+          <button
+            onClick={exportCsv}
+            className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[13px] font-medium text-[#6e6e73] bg-transparent border border-[#d2d2d7] hover:bg-[#f5f5f7] hover:text-[#1d1d1f] transition-all cursor-pointer"
+          >
+            <svg viewBox="0 0 16 16" fill="currentColor" className="w-3 h-3">
+              <path d="M2 4h12v1.5H2zM2 7.25h9v1.5H2zM2 10.5h6v1.5H2z" />
+            </svg>
+            CSV
+          </button>
+        </div>
       </div>
 
       {/* Table */}
-      <div className="overflow-x-auto rounded-2xl bg-white shadow-[0_0_0_1px_rgba(0,0,0,0.04),0_1px_2px_rgba(0,0,0,0.04)]">
-        <table className="w-full text-sm">
+      <div className="flex-1 overflow-auto">
+        <table className="w-full border-collapse min-w-[900px] table-fixed">
           <thead>
-            <tr className="text-left text-sm uppercase tracking-wider text-gray-500">
-              <th className="pl-8 pr-3 py-3.5 font-medium">Product Line</th>
-              <th className="px-3 py-3.5 font-medium">Pillar</th>
-              <th className="px-3 py-3.5 font-medium">Intent</th>
-              <th className="px-3 py-3.5 font-medium">Group</th>
-              <th className="px-3 py-3.5 font-medium">Slug</th>
-              <th className="px-3 py-3.5 font-medium">Keyword</th>
-              <th className="pl-3 pr-8 py-3.5 font-medium text-right">Volume</th>
+            <tr>
+              <th className="w-[100px] bg-white text-[11px] font-semibold text-[#6e6e73] uppercase tracking-[0.6px] py-2.5 px-3.5 text-left border-b border-[#d2d2d7] sticky top-0 z-10 whitespace-nowrap">
+                Product Line
+              </th>
+              <th className="w-[140px] bg-white text-[11px] font-semibold text-[#6e6e73] uppercase tracking-[0.6px] py-2.5 px-3.5 text-left border-b border-[#d2d2d7] sticky top-0 z-10 whitespace-nowrap">
+                Topic Pillar
+              </th>
+              <th className="w-[110px] bg-white text-[11px] font-semibold text-[#6e6e73] uppercase tracking-[0.6px] py-2.5 px-3.5 text-left border-b border-[#d2d2d7] sticky top-0 z-10 whitespace-nowrap">
+                Intent
+              </th>
+              <th className="w-[180px] bg-white text-[11px] font-semibold text-[#6e6e73] uppercase tracking-[0.6px] py-2.5 px-3.5 text-left border-b border-[#d2d2d7] sticky top-0 z-10 whitespace-nowrap">
+                Keyword Group
+              </th>
+              <th className="bg-white text-[11px] font-semibold text-[#6e6e73] uppercase tracking-[0.6px] py-2.5 px-3.5 text-left border-b border-[#d2d2d7] sticky top-0 z-10 whitespace-nowrap">
+                Keywords (L3)
+              </th>
+              <th className="w-[100px] bg-white text-[11px] font-semibold text-[#6e6e73] uppercase tracking-[0.6px] py-2.5 px-3.5 text-left border-b border-[#d2d2d7] sticky top-0 z-10 whitespace-nowrap">
+                Conversion
+              </th>
+              <th className="w-[100px] bg-white text-[11px] font-semibold text-[#6e6e73] uppercase tracking-[0.6px] py-2.5 px-3.5 text-left border-b border-[#d2d2d7] sticky top-0 z-10 whitespace-nowrap">
+                Traffic
+              </th>
             </tr>
           </thead>
-          <tbody className="divide-y divide-gray-100/80">
-            {rows.map((row, idx) => (
-              <tr
-                key={idx}
-                className="transition-colors hover:bg-gray-50/60"
-              >
-                {row.isFirstInProductLine && (
-                  <td
-                    className="pl-8 pr-3 py-2.5 align-top text-gray-900 font-medium border-l-2 border-l-gray-900/10"
-                    rowSpan={row.productLineRowSpan}
-                  >
-                    {row.productLine}
+          <tbody className="font-thai">
+            {filteredRows.map((row, idx) => {
+              const conv = getConversionLevel(row.intent);
+              const traffic = getTrafficLevel(row.totalVolume);
+
+              return (
+                <tr
+                  key={idx}
+                  className="border-b border-[#e8e8ed] last:border-b-0 transition-colors hover:bg-[#e8f1fb]"
+                >
+                  <td className="py-2.5 px-3.5 text-[13px] align-top">
+                    <span className="inline-flex items-center px-2 py-0.5 rounded-[20px] text-[11px] font-semibold tracking-[0.2px] whitespace-nowrap bg-[#e8f1fb] text-[#0071e3]">
+                      {row.productLine}
+                    </span>
                   </td>
-                )}
-                {row.isFirstInPillar && (
-                  <>
-                    <td
-                      className="px-3 py-2.5 align-top text-gray-800"
-                      rowSpan={row.pillarRowSpan}
-                    >
-                      {row.pillar}
-                    </td>
-                    <td
-                      className="px-3 py-2.5 align-top"
-                      rowSpan={row.pillarRowSpan}
-                    >
-                      <IntentDot intent={row.intent} />
-                    </td>
-                  </>
-                )}
-                {row.isFirstInGroup && (
-                  <>
-                    <td
-                      className="px-3 py-2.5 align-top text-gray-800 font-medium"
-                      rowSpan={row.groupRowSpan}
-                    >
-                      {row.group}
-                    </td>
-                    <td
-                      className="px-3 py-2.5 align-top font-mono text-sm text-gray-500 tracking-tight"
-                      rowSpan={row.groupRowSpan}
-                    >
-                      {row.slug}
-                    </td>
-                  </>
-                )}
-                <td className="px-3 py-2 text-gray-800">
-                  {row.keyword}
-                </td>
-                <td className="pl-3 pr-8 py-2 text-right tabular-nums text-gray-600">
-                  {row.volume.toLocaleString()}
-                </td>
-              </tr>
-            ))}
+                  <td className="py-2.5 px-3.5 text-[13px] font-medium text-[#1d1d1f] align-top">
+                    {row.pillar}
+                  </td>
+                  <td className="py-2.5 px-3.5 align-top">{intentPill(row.intent)}</td>
+                  <td className="py-2.5 px-3.5 align-top">
+                    <div className="font-medium text-[13px] text-[#1d1d1f]">{row.group}</div>
+                    <div className="font-mono text-[11px] text-[#6e6e73] mt-0.5">{row.slug}</div>
+                  </td>
+                  <td className="py-2.5 px-3.5 align-top">
+                    <div className="text-[12px] text-[#6e6e73] leading-relaxed">
+                      {row.keywords.map((kw, ki) => (
+                        <span key={ki} className="inline mr-1">
+                          {kw.keyword}{' '}
+                          <span className="font-mono text-[11px] text-[#aeaeb2] bg-[#f5f5f7] px-1 py-px rounded border border-[#e8e8ed] whitespace-nowrap">
+                            {kw.volume.toLocaleString()}
+                          </span>{' '}
+                        </span>
+                      ))}
+                    </div>
+                  </td>
+                  <td className="py-2.5 px-3.5 align-top">
+                    <div className="flex items-center text-[12px] font-medium">
+                      <div className={`w-[7px] h-[7px] rounded-full mr-1.5 shrink-0 ${conv.dot}`} />
+                      {conv.label}
+                    </div>
+                  </td>
+                  <td className="py-2.5 px-3.5 align-top">
+                    <div className="flex items-center text-[12px] font-medium">
+                      <div className={`w-[7px] h-[7px] rounded-full mr-1.5 shrink-0 ${traffic.dot}`} />
+                      {traffic.label}
+                    </div>
+                  </td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       </div>

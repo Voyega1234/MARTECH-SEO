@@ -269,12 +269,18 @@ export async function streamAgent(
     onTool: (toolName: string) => void;
     onDone: (result: string) => void;
     onError: (error: string) => void;
+    onStatus?: (status: string) => void;
   }
 ): Promise<void> {
   if (!process.env.ANTHROPIC_API_KEY) {
     callbacks.onError('ANTHROPIC_API_KEY not set.');
     return;
   }
+
+  const status = (msg: string) => {
+    if (callbacks.onStatus) callbacks.onStatus(msg);
+    else callbacks.onText(msg);
+  };
 
   const startTime = Date.now();
   const mcpClient = await createMcpClient();
@@ -293,13 +299,13 @@ export async function streamAgent(
 
     const researchSystemPrompt = systemPrompt + `\n\nIMPORTANT: You are in RESEARCH PHASE. Your job is to gather keyword data using DFS tools. Do NOT produce the final JSON output yet. Just call the necessary tools to collect keyword and volume data. Be efficient — batch queries, avoid duplicate calls, aim for 3-5 tool calls total. Be concise.`;
 
-    callbacks.onText('[Researching keywords with DFS tools...]\n');
+    status('[Researching keywords with DFS tools...]\n');
 
     while (loopCount < maxLoops) {
       // Check time budget
       const elapsed = Date.now() - startTime;
       if (elapsed > RESEARCH_DEADLINE_MS) {
-        callbacks.onText(`\n[Research time limit reached (${(elapsed / 1000).toFixed(0)}s). Generating with collected data...]\n`);
+        status(`\n[Research time limit reached (${(elapsed / 1000).toFixed(0)}s). Generating with collected data...]\n`);
         break;
       }
 
@@ -322,10 +328,10 @@ export async function streamAgent(
         const classified = err instanceof AgentError ? err : classifyError(err);
         consecutiveFailedLoops++;
         if (classified.retryable && consecutiveFailedLoops < 3) {
-          callbacks.onText(`\n[Retrying research... (${classified.code})]\n`);
+          status(`\n[Retrying research... (${classified.code})]\n`);
           continue;
         }
-        callbacks.onText(`\n[Research interrupted: ${classified.userMessage}. Generating with available data...]\n`);
+        status(`\n[Research interrupted: ${classified.userMessage}. Generating with available data...]\n`);
         break;
       }
 
@@ -346,11 +352,11 @@ export async function streamAgent(
     }
 
     // Phase 2: Generate (streamed)
-    callbacks.onText('\n[Generating keyword map...]\n');
+    status('\n[Generating keyword map...]\n');
     const collectedData = extractToolData(messages);
 
     if (!collectedData.trim()) {
-      callbacks.onText('[Warning: No keyword data collected from DFS. Output may have estimated volumes.]\n');
+      status('[Warning: No keyword data collected from DFS. Output may have estimated volumes.]\n');
     }
 
     let fullText = '';
@@ -372,7 +378,7 @@ export async function streamAgent(
     }).finalMessage();
 
     if (response.stop_reason === 'max_tokens') {
-      callbacks.onText('\n\n[Warning: Output was truncated. Try with fewer product lines.]');
+      status('\n\n[Warning: Output was truncated. Try with fewer product lines.]');
     }
 
     callbacks.onDone(fullText);

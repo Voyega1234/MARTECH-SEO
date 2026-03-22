@@ -296,15 +296,19 @@ export async function runAgent(
     loopCount++;
 
     const claudeStart = Date.now();
+    // Use streaming to avoid Anthropic SDK timeout on long requests
     const response = await callClaudeWithRetry(
-      () => client.beta.messages.create({
-        model: RESEARCH_MODEL,
-        max_tokens: 4000,
-        system: researchSystemPrompt,
-        messages,
-        tools,
-        betas: ['mcp-client-2025-11-20'],
-      }),
+      async () => {
+        const stream = client.beta.messages.stream({
+          model: RESEARCH_MODEL,
+          max_tokens: 4000,
+          system: researchSystemPrompt,
+          messages,
+          tools,
+          betas: ['mcp-client-2025-11-20'],
+        });
+        return stream.finalMessage();
+      },
       `Agent-Research-Loop-${loopCount}`
     );
     const claudeMs = Date.now() - claudeStart;
@@ -354,37 +358,36 @@ export async function runAgent(
 
   const generateStart = Date.now();
 
-  const generateResponse = await callClaudeWithRetry(
-    () => client.beta.messages.create({
-      model: outputModel,
-      max_tokens: 64000,
-      system: systemPrompt,
-      messages: [
-        {
-          role: 'user',
-          content: `${userMessage}\n\n--- KEYWORD DATA (from DFS research) ---\n${collectedData}`,
-        },
-      ],
-      betas: ['mcp-client-2025-11-20'],
-    }),
-    'Agent-Generate'
-  );
+  // Use streaming internally to avoid Anthropic SDK timeout on long requests
+  let fullText = '';
+  const stream = client.beta.messages.stream({
+    model: outputModel,
+    max_tokens: 64000,
+    system: systemPrompt,
+    messages: [
+      {
+        role: 'user',
+        content: `${userMessage}\n\n--- KEYWORD DATA (from DFS research) ---\n${collectedData}`,
+      },
+    ],
+    betas: ['mcp-client-2025-11-20'],
+  });
+
+  const generateResponse = await stream.on('text', (text) => {
+    fullText += text;
+  }).finalMessage();
 
   const generateMs = Date.now() - generateStart;
-  const textContent = generateResponse.content
-    .filter((b: any) => b.type === 'text')
-    .map((b: any) => b.text)
-    .join('\n');
 
   // Validate output is JSON
-  if (!textContent.trim().startsWith('{')) {
+  if (!fullText.trim().startsWith('{')) {
     console.warn('[Agent] Output does not look like JSON — may need re-generation');
   }
 
   console.log(`[Agent] Generate: ${(generateMs / 1000).toFixed(1)}s | Tokens: ${JSON.stringify(generateResponse.usage)}`);
   console.log(`[Agent] Done | Research: ${(totalResearchTime / 1000).toFixed(1)}s | Tools: ${(totalToolTime / 1000).toFixed(1)}s | Generate: ${(generateMs / 1000).toFixed(1)}s | Total: ${elapsed(totalStart)}`);
 
-  return { success: true, result: textContent, toolsUsed: allToolsUsed };
+  return { success: true, result: fullText, toolsUsed: allToolsUsed };
 }
 
 // Streaming version with two-model approach
@@ -396,9 +399,11 @@ export async function streamAgent(
     onTool: (toolName: string) => void;
     onDone: (result: string) => void;
     onError: (error: string) => void;
+    onStatus?: (status: string) => void;
   }
 ): Promise<void> {
   const totalStart = Date.now();
+  let heartbeat: ReturnType<typeof setInterval> | null = null;
 
   // Wrap entire flow in try/catch for top-level errors
   try {
@@ -423,11 +428,23 @@ export async function streamAgent(
     // ===== Phase 1: Research with Haiku =====
     const researchSystemPrompt = systemPrompt + `\n\nIMPORTANT: You are in RESEARCH PHASE. Your job is to gather keyword data using DFS tools. Do NOT produce the final JSON output yet. Just call the necessary tools to collect keyword and volume data. Be efficient — batch queries, avoid duplicate calls, aim for 5-8 tool calls total.`;
 
-    callbacks.onText('[Researching keywords with DFS tools...]\n');
+    const status = (msg: string) => {
+      if (callbacks.onStatus) callbacks.onStatus(msg);
+      else callbacks.onText(msg);
+    };
+
+    status('[Researching keywords with DFS tools...]\n');
+
+    // Heartbeat: send a status event every 15s during long-running operations
+    // This keeps the SSE connection alive and flushes any proxy/OS buffers
+    heartbeat = setInterval(() => {
+      status('');  // empty status keeps connection alive
+    }, 15_000);
 
     while (loopCount < maxLoops) {
       loopCount++;
       console.log(`\n[Stream] --- Research Loop ${loopCount}/${maxLoops} ---`);
+      status(`\n[Research loop ${loopCount}...]\n`);
 
       const claudeStart = Date.now();
 
@@ -451,13 +468,13 @@ export async function streamAgent(
         // If retryable and we haven't failed too many times, skip this loop
         consecutiveFailedLoops++;
         if (classified.retryable && consecutiveFailedLoops < 3) {
-          callbacks.onText(`\n[Retrying research... (${classified.code})]\n`);
+          status(`\n[Retrying research... (${classified.code})]\n`);
           continue;
         }
 
         // Non-retryable or too many failures — proceed to Phase 2 with whatever data we have
         console.warn('[Stream] Proceeding to Phase 2 with partial data');
-        callbacks.onText(`\n[Research interrupted: ${classified.userMessage}. Generating with available data...]\n`);
+        status(`\n[Research interrupted: ${classified.userMessage}. Generating with available data...]\n`);
         break;
       }
 
@@ -505,14 +522,14 @@ export async function streamAgent(
     console.log(`[Stream] Phase 2: GENERATE with ${outputModel}`);
     console.log(`========================================\n`);
 
-    callbacks.onText('\n[Generating keyword map...]\n');
+    status('\n[Generating keyword map...]\n');
 
     const collectedData = extractToolData(messages);
     console.log(`[Stream] Collected data: ${collectedData.length} chars from tool results`);
 
     if (!collectedData.trim()) {
       console.warn('[Stream] No tool data collected — output may lack volume data');
-      callbacks.onText('[Warning: No keyword data collected from DFS. Output may have estimated volumes.]\n');
+      status('[Warning: No keyword data collected from DFS. Output may have estimated volumes.]\n');
     }
 
     let fullText = '';
@@ -547,7 +564,7 @@ export async function streamAgent(
     // Validate output
     if (response.stop_reason === 'max_tokens') {
       console.warn('[Stream] Output was truncated (max_tokens reached)');
-      callbacks.onText('\n\n[Warning: Output was truncated. Try with fewer product lines.]');
+      status('\n\n[Warning: Output was truncated. Try with fewer product lines.]');
     }
 
     console.log('\n========================================');
@@ -560,9 +577,11 @@ export async function streamAgent(
     console.log(`[Stream] Tokens: ${JSON.stringify(response.usage)}`);
     console.log('========================================\n');
 
+    if (heartbeat) clearInterval(heartbeat);
     callbacks.onDone(fullText);
 
   } catch (err) {
+    if (heartbeat) clearInterval(heartbeat);
     const classified = err instanceof AgentError ? err : classifyError(err);
     console.error(`[Stream] Fatal error: ${classified.code} — ${classified.message}`);
     callbacks.onError(classified.userMessage);

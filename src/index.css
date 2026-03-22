@@ -1,6 +1,22 @@
 @import "tailwindcss";
 
 @font-face {
+  font-family: "Google Sans";
+  src: url("/Google_Sans/GoogleSans-Variable.ttf") format("truetype");
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Google Sans";
+  src: url("/Google_Sans/GoogleSans-Italic-Variable.ttf") format("truetype");
+  font-weight: 100 900;
+  font-style: italic;
+  font-display: swap;
+}
+
+@font-face {
   font-family: "Noto Sans Thai";
   src: url("/Noto_Sans_Thai/NotoSansThai-Variable.ttf") format("truetype");
   font-weight: 100 900;
@@ -9,20 +25,33 @@
 }
 
 @theme {
-  --font-sans: "Noto Sans Thai", -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, Helvetica, Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol";
+  --font-sans: "Google Sans", "Noto Sans Thai", -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, Helvetica, Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol";
+  --animate-fadeIn: fadeIn 0.2s ease forwards;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
 }
 
 body {
   font-family: var(--font-sans);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  background: #f5f5f7;
+  color: #1d1d1f;
+  font-size: 14px;
+  height: 100vh;
+  overflow: hidden;
 }
 
-.bg-pastel-gradient {
-  background-color: #f4f0ff;
-  background-image: 
-    radial-gradient(at 0% 0%, #e5d9f2 0px, transparent 50%),
-    radial-gradient(at 100% 0%, #f3e8fd 0px, transparent 50%),
-    radial-gradient(at 100% 100%, #e2f4ec 0px, transparent 50%),
-    radial-gradient(at 0% 100%, #fdeaf4 0px, transparent 50%);
+/* Table Thai text */
+.font-thai {
+  font-family: "Noto Sans Thai", "Google Sans", sans-serif;
 }
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #d2d2d7; border-radius: 99px; }
+::-webkit-scrollbar-thumb:hover { background: #aeaeb2; }
