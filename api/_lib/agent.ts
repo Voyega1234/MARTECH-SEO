@@ -175,12 +175,17 @@ async function callClaudeWithRetry<T>(fn: () => Promise<T>, label: string, maxRe
   throw new AgentError('Unreachable', 'unknown', 'Unexpected error');
 }
 
+// Time budget: stop research after this many seconds, leave rest for generation
+const RESEARCH_DEADLINE_MS = 200_000; // 200s for research
+const TOTAL_DEADLINE_MS = 280_000;    // 280s hard limit (leave 20s buffer before Vercel 300s)
+
 // Non-streaming agent
 export async function runAgent(systemPrompt: string, userMessage: string): Promise<AgentResult> {
   if (!process.env.ANTHROPIC_API_KEY) {
     throw new AgentError('ANTHROPIC_API_KEY not set', 'missing_api_key', 'Set ANTHROPIC_API_KEY environment variable.');
   }
 
+  const startTime = Date.now();
   const client = new Anthropic();
   const outputModel = getOutputModel();
   const allToolsUsed: string[] = [];
@@ -194,9 +199,15 @@ export async function runAgent(systemPrompt: string, userMessage: string): Promi
     let loopCount = 0;
     const maxLoops = 8;
 
-    const researchSystemPrompt = systemPrompt + `\n\nIMPORTANT: You are in RESEARCH PHASE. Your job is to gather keyword data using DFS tools. Do NOT produce the final JSON output yet. Just call the necessary tools to collect keyword and volume data. Be efficient — batch queries, avoid duplicate calls, aim for 5-8 tool calls total.`;
+    const researchSystemPrompt = systemPrompt + `\n\nIMPORTANT: You are in RESEARCH PHASE. Your job is to gather keyword data using DFS tools. Do NOT produce the final JSON output yet. Just call the necessary tools to collect keyword and volume data. Be efficient — batch queries, avoid duplicate calls, aim for 3-5 tool calls total. Be concise.`;
 
     while (loopCount < maxLoops) {
+      // Check time budget
+      if (Date.now() - startTime > RESEARCH_DEADLINE_MS) {
+        console.log(`[Agent] Research deadline reached (${((Date.now() - startTime) / 1000).toFixed(0)}s). Moving to generation.`);
+        break;
+      }
+
       loopCount++;
       const response = await callClaudeWithRetry(
         () => client.beta.messages.create({
@@ -265,6 +276,7 @@ export async function streamAgent(
     return;
   }
 
+  const startTime = Date.now();
   const mcpClient = await createMcpClient();
 
   try {
@@ -279,11 +291,18 @@ export async function streamAgent(
     const maxLoops = 8;
     let consecutiveFailedLoops = 0;
 
-    const researchSystemPrompt = systemPrompt + `\n\nIMPORTANT: You are in RESEARCH PHASE. Your job is to gather keyword data using DFS tools. Do NOT produce the final JSON output yet. Just call the necessary tools to collect keyword and volume data. Be efficient — batch queries, avoid duplicate calls, aim for 5-8 tool calls total.`;
+    const researchSystemPrompt = systemPrompt + `\n\nIMPORTANT: You are in RESEARCH PHASE. Your job is to gather keyword data using DFS tools. Do NOT produce the final JSON output yet. Just call the necessary tools to collect keyword and volume data. Be efficient — batch queries, avoid duplicate calls, aim for 3-5 tool calls total. Be concise.`;
 
     callbacks.onText('[Researching keywords with DFS tools...]\n');
 
     while (loopCount < maxLoops) {
+      // Check time budget
+      const elapsed = Date.now() - startTime;
+      if (elapsed > RESEARCH_DEADLINE_MS) {
+        callbacks.onText(`\n[Research time limit reached (${(elapsed / 1000).toFixed(0)}s). Generating with collected data...]\n`);
+        break;
+      }
+
       loopCount++;
 
       let response;
