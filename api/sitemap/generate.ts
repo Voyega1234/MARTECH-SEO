@@ -1,6 +1,6 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
-import { runAgent, AgentError } from '../_lib/agent';
-import { getSitemapPrompt } from '../_lib/prompts';
+import { runAgent, AgentError } from '../_lib/agent.js';
+import { getSitemapPrompt } from '../_lib/prompts.js';
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (req.method !== 'POST') {

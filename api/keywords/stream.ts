@@ -1,6 +1,6 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
-import { streamAgent, AgentError } from '../_lib/agent';
-import { getKeywordGeneratorPrompt } from '../_lib/prompts';
+import { streamAgent, AgentError } from '../_lib/agent.js';
+import { getKeywordGeneratorPrompt } from '../_lib/prompts.js';
 
 export const config = {
   supportsResponseStreaming: true,

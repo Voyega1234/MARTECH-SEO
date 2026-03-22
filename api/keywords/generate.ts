@@ -1,6 +1,6 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
-import { runAgent, AgentError } from '../_lib/agent';
-import { getKeywordGeneratorPrompt } from '../_lib/prompts';
+import { runAgent, AgentError } from '../_lib/agent.js';
+import { getKeywordGeneratorPrompt } from '../_lib/prompts.js';
 
 function buildKeywordUserMessage(formData: Record<string, any>): string {
   const parts: string[] = [];

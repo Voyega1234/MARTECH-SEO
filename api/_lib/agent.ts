@@ -1,6 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { mcpTools } from '@anthropic-ai/sdk/helpers/beta/mcp';
-import { createMcpClient, closeMcpClient } from './mcp';
+import { createMcpClient, closeMcpClient } from './mcp.js';
 
 // Two models: fast for research, quality for output
 const RESEARCH_MODEL = 'claude-haiku-4-5-20251001';

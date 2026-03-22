@@ -1,6 +1,6 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
-import { streamAgent, AgentError } from '../_lib/agent';
-import { getSitemapPrompt } from '../_lib/prompts';
+import { streamAgent, AgentError } from '../_lib/agent.js';
+import { getSitemapPrompt } from '../_lib/prompts.js';
 
 export const config = {
   supportsResponseStreaming: true,
