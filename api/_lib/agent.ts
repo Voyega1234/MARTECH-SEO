@@ -210,14 +210,17 @@ export async function runAgent(systemPrompt: string, userMessage: string): Promi
 
       loopCount++;
       const response = await callClaudeWithRetry(
-        () => client.beta.messages.create({
-          model: RESEARCH_MODEL,
-          max_tokens: 4000,
-          system: researchSystemPrompt,
-          messages,
-          tools,
-          betas: ['mcp-client-2025-11-20'],
-        }),
+        async () => {
+          const stream = client.beta.messages.stream({
+            model: RESEARCH_MODEL,
+            max_tokens: 4000,
+            system: researchSystemPrompt,
+            messages,
+            tools,
+            betas: ['mcp-client-2025-11-20'],
+          });
+          return stream.finalMessage();
+        },
         `Agent-Research-Loop-${loopCount}`
       );
 
@@ -236,25 +239,22 @@ export async function runAgent(systemPrompt: string, userMessage: string): Promi
       messages.push({ role: 'user', content: toolResults });
     }
 
-    // Phase 2: Generate
+    // Phase 2: Generate (use streaming to avoid SDK timeout on long requests)
     const collectedData = extractToolData(messages);
-    const generateResponse = await callClaudeWithRetry(
-      () => client.beta.messages.create({
-        model: outputModel,
-        max_tokens: 64000,
-        system: systemPrompt,
-        messages: [{ role: 'user', content: `${userMessage}\n\n--- KEYWORD DATA (from DFS research) ---\n${collectedData}` }],
-        betas: ['mcp-client-2025-11-20'],
-      }),
-      'Agent-Generate'
-    );
+    let fullText = '';
+    const generateStream = client.beta.messages.stream({
+      model: outputModel,
+      max_tokens: 64000,
+      system: systemPrompt,
+      messages: [{ role: 'user', content: `${userMessage}\n\n--- KEYWORD DATA (from DFS research) ---\n${collectedData}` }],
+      betas: ['mcp-client-2025-11-20'],
+    });
 
-    const textContent = generateResponse.content
-      .filter((b: any) => b.type === 'text')
-      .map((b: any) => b.text)
-      .join('\n');
+    await generateStream.on('text', (text) => {
+      fullText += text;
+    }).finalMessage();
 
-    return { success: true, result: textContent, toolsUsed: allToolsUsed };
+    return { success: true, result: fullText, toolsUsed: allToolsUsed };
   } finally {
     await closeMcpClient(mcpClient);
   }
