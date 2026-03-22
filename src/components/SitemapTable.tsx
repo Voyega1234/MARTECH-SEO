@@ -293,7 +293,7 @@ export function SitemapTable({ data }: { data: string }) {
       {/* Table View */}
       {viewMode === 'table' && (
         <div className="flex-1 overflow-auto">
-          <table className="w-full border-collapse min-w-[900px] table-fixed">
+          <table className="w-full border-collapse min-w-[900px]">
             <thead>
               <tr>
                 <th className="w-[120px] bg-white text-[11px] font-semibold text-[#6e6e73] uppercase tracking-[0.6px] py-2.5 px-3.5 text-left border-b border-[#d2d2d7] sticky top-0 z-10">
