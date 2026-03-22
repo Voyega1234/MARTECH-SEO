@@ -1,0 +1,28 @@
+@import "tailwindcss";
+
+@font-face {
+  font-family: "Noto Sans Thai";
+  src: url("/Noto_Sans_Thai/NotoSansThai-VariableFont_wdth,wght.ttf") format("truetype");
+  font-weight: 100 900;
+  font-stretch: 62.5% 100%;
+  font-display: swap;
+}
+
+@theme {
+  --font-sans: "Noto Sans Thai", -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, Helvetica, Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol";
+}
+
+body {
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+.bg-pastel-gradient {
+  background-color: #f4f0ff;
+  background-image: 
+    radial-gradient(at 0% 0%, #e5d9f2 0px, transparent 50%),
+    radial-gradient(at 100% 0%, #f3e8fd 0px, transparent 50%),
+    radial-gradient(at 100% 100%, #e2f4ec 0px, transparent 50%),
+    radial-gradient(at 0% 100%, #fdeaf4 0px, transparent 50%);
+}
