@@ -1,20 +1,25 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 
 export async function createMcpClient(): Promise<Client> {
   if (!process.env.DFS_API_LOGIN || !process.env.DFS_API_PASSWORD) {
     throw new Error('DFS_API_LOGIN and DFS_API_PASSWORD must be set');
   }
 
-  const transport = new StdioClientTransport({
-    command: 'npx',
-    args: ['-y', 'dataforseo-mcp-server'],
-    env: {
-      ...process.env,
-      DATAFORSEO_USERNAME: process.env.DFS_API_LOGIN || '',
-      DATAFORSEO_PASSWORD: process.env.DFS_API_PASSWORD || '',
-    },
-  });
+  const credentials = Buffer.from(
+    `${process.env.DFS_API_LOGIN}:${process.env.DFS_API_PASSWORD}`
+  ).toString('base64');
+
+  const transport = new StreamableHTTPClientTransport(
+    new URL('https://mcp.dataforseo.com/mcp'),
+    {
+      requestInit: {
+        headers: {
+          Authorization: `Basic ${credentials}`,
+        },
+      },
+    }
+  );
 
   const client = new Client({ name: 'martech-seo', version: '1.0.0' });
 
