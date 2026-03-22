@@ -58,7 +58,7 @@ Pillar (L1): Use core keywords or templates like [placeholder].
 Pillar Intent: Assign the primary intent (Transactional, Commercial, Informational).
 Keyword Group (L2): Each must be a specific search intent. No placeholders.
 Slug: Create SEO-friendly English slugs.
-Keywords (L3): Provide all relevant variations including synonyms, typos, long-tail variations, or similar keywords that can be grouped together within the same slug. There is no set limit on the number of variations—provide as many as are relevant to the topic. Also next to each keyword, provide the search volume of that keyword (extracted from DFS MCP for exact search volume - do not give estimates). If the primary keyword data source returns 0, blank, or N/A, put in 10. Check historical data if available to retrieve the last known non-zero value.
+Keywords (L3): For each keyword group, include the core keyword + top 5 best variations by volume. Prioritize high-intent and high-volume keywords. Skip redundant variations that add no strategic value (e.g., minor typos or near-identical phrasings). If a group naturally has fewer relevant keywords, include only what matters — quality over quantity. Also next to each keyword, provide the search volume of that keyword (extracted from DFS MCP for exact search volume - do not give estimates). If the primary keyword data source returns 0, blank, or N/A, put in 10. Check historical data if available to retrieve the last known non-zero value.
 Format: Your FINAL output must be ONLY a valid JSON object — no markdown, no tables, no prose, no explanations, no code fences, no ```json``` blocks. Do not output anything before or after the JSON. The response must start with { and end with }.
 Output JSON Schema:
 {
