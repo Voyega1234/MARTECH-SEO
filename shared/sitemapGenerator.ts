@@ -114,23 +114,23 @@ function maxVolume(keywords: SitemapKeyword[]): number {
   return keywords.reduce((max, kw) => Math.max(max, kw.volume), 0);
 }
 
-function normalizeSection(section: string, fallback: string): string {
+function sectionKind(section: string): 'home' | 'product' | 'price' | 'service' | 'blog' | 'other' {
   const value = compactText(section).toLowerCase();
-  if (!value) return fallback;
-  if (value === 'home') return HOME_SECTION;
+  if (!value) return 'other';
+  if (value === 'home') return 'home';
   if (['product', 'products', 'shop', 'category', 'categories', 'collection', 'collections'].includes(value)) {
-    return PRODUCT_SECTION;
+    return 'product';
   }
   if (['price', 'prices', 'pricing', 'quote', 'quotes'].includes(value)) {
-    return PRICE_SECTION;
+    return 'price';
   }
   if (['service', 'services', 'solution', 'solutions'].includes(value)) {
-    return SERVICE_SECTION;
+    return 'service';
   }
-  if (['blog', 'blogs', 'guide', 'guides', 'article', 'articles', 'insights', 'knowledge'].includes(value)) {
-    return BLOG_SECTION;
+  if (['blog', 'blogs', 'guide', 'guides', 'article', 'articles', 'insights', 'knowledge', 'tool', 'tools', 'supporting pages', 'supporting page'].includes(value)) {
+    return value.startsWith('blog') || value.includes('guide') || value.includes('article') || value.includes('insight') ? 'blog' : 'other';
   }
-  return fallback;
+  return 'other';
 }
 
 function detectSection(
@@ -174,8 +174,9 @@ function pageTitleFor(keywordGroup: string, businessName: string): string {
 
 function conversionPotentialFor(section: string, pillarIntent: string): 'Low' | 'Medium' | 'High' {
   const intent = compactText(pillarIntent).toLowerCase();
-  if (section === PRICE_SECTION || section === PRODUCT_SECTION || intent === 'transactional') return 'High';
-  if (section === SERVICE_SECTION || intent === 'commercial') return 'Medium';
+  const kind = sectionKind(section);
+  if (kind === 'price' || kind === 'product' || intent === 'transactional') return 'High';
+  if (kind === 'service' || intent === 'commercial') return 'Medium';
   return 'Low';
 }
 
@@ -281,8 +282,23 @@ export function buildHybridSitemap(
       traffic_potential: trafficPotentialFor(homepageKeywords),
     });
 
-    for (const candidate of aiCandidates) {
-      candidate.index += 1;
+    aiCandidates.unshift({
+      index: 0,
+      product_line: '',
+      topic_pillar: '',
+      pillar_intent: '',
+      keyword_group: businessName || 'Home',
+      slug_and_path: '/',
+      keywords: homepageKeywords,
+      current_section: HOME_SECTION,
+      current_sub_section_or_category: '',
+      current_page_title: businessName || 'Home',
+      confidence: 1,
+      reason: 'homepage',
+    });
+
+    for (let i = 1; i < aiCandidates.length; i++) {
+      aiCandidates[i].index += 1;
     }
   }
 
@@ -297,7 +313,7 @@ Return ONLY valid JSON:
   "items": [
     {
       "index": 0,
-      "section": "Products | Service | Price | Blog",
+      "section": "string",
       "sub_section_or_category": "string",
       "page_title": "string"
     }
@@ -306,9 +322,14 @@ Return ONLY valid JSON:
 
 Rules:
 - Return one item for every input index.
-- Choose only from section values: Products, Service, Price, Blog.
 - Use the current slug only as context. Do not rewrite paths.
-- Prefer Products for product/category pages, Service for service pages, Price for pricing/quote pages, and Blog for informational pages.
+- Choose the most appropriate top-level site section based on business context and keyword intent.
+- Common section patterns include Home, Services, Pricing, Blog, Tools, Supporting Pages, Products, Shop, or Categories.
+- Use Products/Shop/Categories when the page is clearly an ecommerce or product listing page.
+- Use Services when the page is clearly a service or solution page.
+- Use Pricing when the page is specifically about price, packages, quotes, or cost comparison.
+- Use Blog when the page is informational, educational, or guide-style content.
+- Write page_title as a polished, natural SEO title for that page, not just a copied keyword group.
 - Preserve the original meaning of each keyword group.
 - Do not invent new keyword groups.`;
 }
@@ -352,7 +373,7 @@ export function applyRefinements(
   for (const refinement of refinements) {
     const current = next[refinement.index];
     if (!current) continue;
-    const section = normalizeSection(refinement.section, current.section);
+    const section = compactText(refinement.section) || current.section;
 
     next[refinement.index] = {
       ...current,
@@ -361,11 +382,11 @@ export function applyRefinements(
       page_title: refinement.page_title,
       slug_and_path: refinement.slug_and_path || current.slug_and_path,
       conversion_potential:
-        section === PRICE_SECTION || section === PRODUCT_SECTION
+        sectionKind(section) === 'price' || sectionKind(section) === 'product'
           ? 'High'
-          : section === SERVICE_SECTION
+          : sectionKind(section) === 'service'
           ? 'Medium'
-          : section === BLOG_SECTION
+          : sectionKind(section) === 'blog'
           ? 'Low'
           : current.conversion_potential,
     };
