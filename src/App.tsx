@@ -990,7 +990,7 @@ export default function App() {
                       <label className="text-[12px] font-semibold text-[#1d1d1f]">Website URL</label>
                       <Input
                         type="text"
-                        placeholder="convertcake.com"
+                        placeholder="solarth.co.th"
                         value={formData.websiteUrl}
                         onChange={(e) => setFormData({ ...formData, websiteUrl: e.target.value })}
                         className="!bg-[#f5f5f7] !border-[#d2d2d7] !rounded-[10px] !px-3.5 !py-2.5 !text-[13.5px] focus:!border-[#0071e3] focus:!bg-white focus:!shadow-[0_0_0_3px_rgba(0,113,227,0.12)]"
@@ -1006,7 +1006,7 @@ export default function App() {
                         Describe your primary products or services and the value you deliver to customers.
                       </p>
                       <TextArea
-                        placeholder="Example: SolarTH is an online platform that aggregates solar installation companies in Thailand..."
+                        placeholder="Example: SolarTH is an online platform that aggregates solar installation companies in Thailand. It allows consumers (homeowners, businesses, factories) to search, compare prices, and find qualified installers for their solar system needs."
                         value={formData.businessDescription}
                         onChange={(e) => setFormData({ ...formData, businessDescription: e.target.value })}
                         required
@@ -1046,7 +1046,7 @@ export default function App() {
                         Define your campaign goal and the specific action you want visitors to take.
                       </p>
                       <TextArea
-                        placeholder="Example: SEO Goal: Generate traffic from people researching solar energy..."
+                        placeholder="Example: SEO Goal: Generate traffic from people researching solar energy and capture qualified leads from consumers looking to install solar systems. Conversion Action: User submission of the lead form requesting quotes or consultation."
                         value={formData.seoGoals}
                         onChange={(e) => setFormData({ ...formData, seoGoals: e.target.value })}
                         required
