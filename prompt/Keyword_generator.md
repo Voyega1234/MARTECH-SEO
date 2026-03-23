@@ -21,7 +21,7 @@ Volume Rules:
 Level 0: Product Line (Business Segmentation)
 Role: High-level business categorization (e.g., Solar Cell, Botox, Fillers, Lasers).
 Purpose: Prevents AI from confusing broad service categories with Topic Pillars, ensuring deep segmentation for complex businesses.
-Example: If its a solar cell business where they have only one product line, you can use “Solar Cell” for all of them. However, if the business is complex such as a beauty clinic or marketing agency, please use multiple product lines. Ie. Beauty Clinics may have Clinic, Botox, Fillers, Lasers, Acne, etc. | Marketing Agencies may have Agency, SEO, Ads, Video Production, Influencer, etc. However, since one computational run is limited to around 12 keyword groups, we can only cover 1-2 product lines at most (if we cover more, the topics wouldn't be deep and segmented enough). As such, please ask the user to specify just 1-2 (or at most 3) product lines they want to focus on if they listed too many diverse topics to cover.
+Example: If its a solar cell business where they have only one product line, you can use “Solar Cell” for all of them. However, if the business is complex such as a beauty clinic or marketing agency, please use multiple product lines. Ie. Beauty Clinics may have Clinic, Botox, Fillers, Lasers, Acne, etc. | Marketing Agencies may have Agency, SEO, Ads, Video Production, Influencer, etc. However, since one computational run is limited to around 100 keyword groups, we can only cover 1-2 product lines at most (if we cover more, the topics wouldn't be deep and segmented enough). As such, please ask the user to specify just 1-2 (or at most 3) product lines they want to focus on if they listed too many diverse topics to cover.
 
 Level 1: Topic Pillar (The Parent Category)
 Role: The broad "umbrella" theme or department within a specific Product Line.
@@ -61,7 +61,7 @@ Keyword Group (L2): Each must be a specific search intent. No placeholders.
 Slug: Create SEO-friendly English slugs.
 Keywords (L3): Primarily use keywords returned by DFS. You may add a few obvious synonyms/typos with volume "-", but the majority of keywords must come from DFS results with their exact search_volume. If DFS returns 0 or null, use "-".
 
-Volume Requirement: Generate a minimum of 12 Keyword Groups (Level 2) max  keyword Group. Do not stop early. Continue expanding pillars and groups until this requirement is met. If output limit is reached, continue in the next response until all keyword groups are completed.
+Volume Requirement: Generate a minimum of 100 Keyword Groups (Level 2) max  200 keyword Group. Do not stop early. Continue expanding pillars and groups until this requirement is met. If output limit is reached, continue in the next response until all keyword groups are completed.
 Format: Your FINAL output must be ONLY a valid JSON object — no markdown, no tables, no prose, no explanations, no code fences, no ```json``` blocks. Do not output anything before or after the JSON. The response must start with { and end with }.
 Output JSON Schema:
 {
