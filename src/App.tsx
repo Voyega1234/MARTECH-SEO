@@ -136,6 +136,8 @@ export default function App() {
   // Track when each step completed (elapsed seconds at completion)
   const stepTimesRef = useRef<Record<string, number>>({});
   const elapsedRef = useRef(0);
+  // Track standalone sitemap generation (from Keywords panel button)
+  const [sitemapOnly, setSitemapOnly] = useState(false);
 
   // Elapsed timer
   useEffect(() => {
@@ -371,6 +373,79 @@ export default function App() {
       setRunningProjectId(null);
       setViewingOtherProject(false);
       runningFormDataRef.current = null;
+    }
+  };
+
+  const handleGenerateSitemap = async () => {
+    if (generating || !keywordResult) return;
+
+    setSitemapOnly(true);
+    setGenerating('sitemap');
+    setStreamText('');
+    setError('');
+    setActivePanel('keywords'); // stay on keywords while generating
+    stepTimesRef.current = {};
+
+    try {
+      log('> Starting sitemap generation...\n');
+
+      const businessContext = `${formData.businessName} — ${formData.businessDescription}`;
+      const MAX_ATTEMPTS = 3;
+      let sitemapJSON: string | null = null;
+
+      for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+        if (attempt > 1) {
+          log(`> Sitemap attempt ${attempt}/${MAX_ATTEMPTS}: Re-generating...\n`);
+        }
+
+        log('> Building sitemap structure from keyword groups...\n');
+        const result = await generateSitemap(keywordResult, businessContext);
+        log('> Validating sitemap output format...\n');
+        sitemapJSON = extractSitemapJSON(result.result);
+
+        if (sitemapJSON) {
+          log('> Sitemap generated successfully.\n');
+          break;
+        }
+
+        console.warn(`[Sitemap] Attempt ${attempt}: Invalid JSON format, retrying...`);
+        log(`> Invalid sitemap format received. ${attempt < MAX_ATTEMPTS ? 'Retrying...' : 'Max retries reached.'}\n`);
+      }
+
+      if (!sitemapJSON) {
+        setError('Failed to generate valid sitemap after multiple attempts. Please try again.');
+        setGenerating(null);
+        return;
+      }
+
+      setSitemapResult(sitemapJSON);
+      stepTimesRef.current.sitemap = elapsedRef.current;
+
+      // Save sitemap to Supabase
+      if (projectId) {
+        try {
+          await saveSitemapResult(projectId, sitemapJSON);
+          log('> Sitemap saved to database\n');
+        } catch (err) {
+          console.error('Failed to save sitemap:', err);
+        }
+      }
+
+      // Refresh project list
+      try {
+        setProjects(await listProjects());
+      } catch (err) {
+        console.error('Failed to refresh projects:', err);
+      }
+
+      log('\n> Done! Sitemap generated.\n');
+      setGenerating(null);
+      setSitemapOnly(false);
+      setActivePanel('sitemap');
+    } catch (err) {
+      setError((err as Error).message);
+      setGenerating(null);
+      setSitemapOnly(false);
     }
   };
 
@@ -680,48 +755,71 @@ export default function App() {
           {generating && !viewingOtherProject && (() => {
             const fmt = (s: number) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
 
-            const steps = [
-              {
-                emoji: '🔗',
-                doneEmoji: '✅',
-                label: 'Connected to AI agent',
-                desc: 'Initializing project',
-                doneDesc: 'Project saved to database',
-                done: elapsed >= 2,
-                active: elapsed < 2,
-                doneTime: stepTimesRef.current.connected,
-              },
-              {
-                emoji: '🔍',
-                doneEmoji: '✅',
-                label: 'Researching keywords',
-                desc: 'Scanning search volumes with DataForSEO',
-                doneDesc: 'Keywords fetched successfully',
-                done: generating === 'sitemap',
-                active: generating === 'keywords' && elapsed >= 2,
-                doneTime: stepTimesRef.current.keywords,
-              },
-              {
-                emoji: '🗺️',
-                doneEmoji: '✅',
-                label: 'Building sitemap',
-                desc: 'Mapping clusters to URL structure',
-                doneDesc: 'Sitemap pages mapped successfully',
-                done: false,
-                active: generating === 'sitemap',
-                doneTime: stepTimesRef.current.sitemap,
-              },
-              {
-                emoji: '📄',
-                doneEmoji: '🎉',
-                label: 'Finalizing report',
-                desc: 'Almost there',
-                doneDesc: 'Keyword map ready to export',
-                done: false,
-                active: false,
-                doneTime: stepTimesRef.current.finalize,
-              },
-            ];
+            const steps = sitemapOnly
+              ? [
+                  {
+                    emoji: '🗺️',
+                    doneEmoji: '✅',
+                    label: 'Building sitemap',
+                    desc: 'Mapping clusters to URL structure',
+                    doneDesc: 'Sitemap pages mapped successfully',
+                    done: false,
+                    active: true,
+                    doneTime: stepTimesRef.current.sitemap,
+                  },
+                  {
+                    emoji: '📄',
+                    doneEmoji: '🎉',
+                    label: 'Finalizing report',
+                    desc: 'Almost there',
+                    doneDesc: 'Sitemap ready to export',
+                    done: false,
+                    active: false,
+                    doneTime: stepTimesRef.current.finalize,
+                  },
+                ]
+              : [
+                  {
+                    emoji: '🔗',
+                    doneEmoji: '✅',
+                    label: 'Connected to AI agent',
+                    desc: 'Initializing project',
+                    doneDesc: 'Project saved to database',
+                    done: elapsed >= 2,
+                    active: elapsed < 2,
+                    doneTime: stepTimesRef.current.connected,
+                  },
+                  {
+                    emoji: '🔍',
+                    doneEmoji: '✅',
+                    label: 'Researching keywords',
+                    desc: 'Scanning search volumes with DataForSEO',
+                    doneDesc: 'Keywords fetched successfully',
+                    done: generating === 'sitemap',
+                    active: generating === 'keywords' && elapsed >= 2,
+                    doneTime: stepTimesRef.current.keywords,
+                  },
+                  {
+                    emoji: '🗺️',
+                    doneEmoji: '✅',
+                    label: 'Building sitemap',
+                    desc: 'Mapping clusters to URL structure',
+                    doneDesc: 'Sitemap pages mapped successfully',
+                    done: false,
+                    active: generating === 'sitemap',
+                    doneTime: stepTimesRef.current.sitemap,
+                  },
+                  {
+                    emoji: '📄',
+                    doneEmoji: '🎉',
+                    label: 'Finalizing report',
+                    desc: 'Almost there',
+                    doneDesc: 'Keyword map ready to export',
+                    done: false,
+                    active: false,
+                    doneTime: stepTimesRef.current.finalize,
+                  },
+                ];
 
             const heroEmoji = generating === 'sitemap' ? '🗺️' : '🔍';
             const title = generating === 'keywords' ? 'Researching keywords...' : 'Building sitemap...';
@@ -738,8 +836,11 @@ export default function App() {
                   {/* Title */}
                   <div className="text-[18px] font-medium text-[#1d1d1f] mb-1.5">{title}</div>
                   <div className="text-[13px] text-[#6e6e73] mb-8 leading-relaxed">
-                    Hang tight — the AI is scanning search volumes<br />
-                    and building your SEO map for <strong className="text-[#1d1d1f]">{businessName}</strong>
+                    {sitemapOnly ? (
+                      <>Mapping keyword groups into URL structure<br />for <strong className="text-[#1d1d1f]">{businessName}</strong></>
+                    ) : (
+                      <>Hang tight — the AI is scanning search volumes<br />and building your SEO map for <strong className="text-[#1d1d1f]">{businessName}</strong></>
+                    )}
                   </div>
 
                   {/* Steps */}
@@ -1007,6 +1108,31 @@ export default function App() {
                       Topical authority map · {keywordGroupCount} groups
                     </div>
                   </div>
+                  <button
+                    onClick={handleGenerateSitemap}
+                    disabled={!!generating}
+                    className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg text-[13px] font-medium text-white bg-[#0071e3] border-none hover:bg-[#0077ed] active:scale-[0.98] transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
+                  >
+                    {generating === 'sitemap' ? (
+                      <>
+                        <svg className="w-3.5 h-3.5 animate-spin" viewBox="0 0 16 16" fill="none">
+                          <circle cx="8" cy="8" r="6" stroke="currentColor" strokeWidth="2" strokeDasharray="28" strokeDashoffset="8" />
+                        </svg>
+                        Generating Sitemap...
+                      </>
+                    ) : hasSitemap ? (
+                      <>
+                        Re-generate Sitemap
+                      </>
+                    ) : (
+                      <>
+                        <svg viewBox="0 0 16 16" fill="currentColor" className="w-3.5 h-3.5">
+                          <path d="M12.78 6.22a.75.75 0 0 1 0 1.06l-4.25 4.25a.75.75 0 0 1-1.06 0L3.22 7.28a.75.75 0 0 1 1.06-1.06L8 9.94l3.72-3.72a.75.75 0 0 1 1.06 0z" transform="rotate(-90 8 8)" />
+                        </svg>
+                        Generate Sitemap
+                      </>
+                    )}
+                  </button>
                 </div>
               </div>
 

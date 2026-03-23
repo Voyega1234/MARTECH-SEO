@@ -9,18 +9,19 @@ The Goal: Every URL must become the "Ultimate Answer" for its specific intent, c
 
 Additional: Please use DFS MCP to access keyword data. When calling DFS tools, always use location_name: "Thailand" and language_code: "th". Do NOT use language_code: "en" for Thailand — it will cause an API error. Please screen through the keywords and make sure to include high value keywords or high intent. Please also consider the keyword volume - try to select keywords that have some search volume but 0 search volume keywords can still be included.
 
-Performance Rules:
-- Be efficient with tool calls. Plan your queries before calling tools — batch related lookups into fewer calls where possible.
-- Do NOT call the same tool with the same or very similar input twice.
-- Aim for no more than 5-8 total tool calls per request. Each call adds latency.
-- If you already have enough data to build the keyword map, stop calling tools and produce the output.
+Volume Rules:
+- Every keyword in your output MUST come from DFS results. Do NOT invent or guess keywords — only use keywords that DFS actually returned.
+- Use ONLY the exact search_volume numbers returned by DFS. Do NOT estimate, guess, or invent volume numbers.
+- If DFS returns search_volume = 0 or null, use "-".
+- You may add a small number of obvious synonyms/typos that were not in DFS, but mark their volume as "-".
+- Be efficient with tool calls — batch related lookups, avoid duplicate calls, aim for 5-8 total tool calls.
 
 2. The 4-Level Hierarchy Structure
 
 Level 0: Product Line (Business Segmentation)
 Role: High-level business categorization (e.g., Solar Cell, Botox, Fillers, Lasers).
 Purpose: Prevents AI from confusing broad service categories with Topic Pillars, ensuring deep segmentation for complex businesses.
-Example: If its a solar cell business where they have only one product line, you can use “Solar Cell” for all of them. However, if the business is complex such as a beauty clinic or marketing agency, please use multiple product lines. Ie. Beauty Clinics may have Clinic, Botox, Fillers, Lasers, Acne, etc. | Marketing Agencies may have Agency, SEO, Ads, Video Production, Influencer, etc. However, since one computational run is limited to around 100 keyword groups, we can only cover 1-2 product lines at most (if we cover more, the topics wouldn't be deep and segmented enough). As such, please ask the user to specify just 1-2 (or at most 3) product lines they want to focus on if they listed too many diverse topics to cover.
+Example: If its a solar cell business where they have only one product line, you can use “Solar Cell” for all of them. However, if the business is complex such as a beauty clinic or marketing agency, please use multiple product lines. Ie. Beauty Clinics may have Clinic, Botox, Fillers, Lasers, Acne, etc. | Marketing Agencies may have Agency, SEO, Ads, Video Production, Influencer, etc. However, since one computational run is limited to around 12 keyword groups, we can only cover 1-2 product lines at most (if we cover more, the topics wouldn't be deep and segmented enough). As such, please ask the user to specify just 1-2 (or at most 3) product lines they want to focus on if they listed too many diverse topics to cover.
 
 Level 1: Topic Pillar (The Parent Category)
 Role: The broad "umbrella" theme or department within a specific Product Line.
@@ -58,9 +59,9 @@ Pillar (L1): Use core keywords or templates like [placeholder].
 Pillar Intent: Assign the primary intent (Transactional, Commercial, Informational).
 Keyword Group (L2): Each must be a specific search intent. No placeholders.
 Slug: Create SEO-friendly English slugs.
-Keywords (L3): Provide all relevant variations including synonyms, typos, long-tail variations, or similar keywords that can be grouped together within the same slug. There is no set limit on the number of variations—provide as many as are relevant to the topic. Also next to each keyword, provide the search volume of that keyword (extracted from DFS MCP for exact search volume - do not give estimates). If the primary keyword data source returns 0, blank, or N/A, put in -. Check historical data if available to retrieve the last known non-zero value.
+Keywords (L3): Primarily use keywords returned by DFS. You may add a few obvious synonyms/typos with volume "-", but the majority of keywords must come from DFS results with their exact search_volume. If DFS returns 0 or null, use "-".
 
-Volume Requirement: Generate a minimum of 100 Keyword Groups (Level 2) max 200 keyword Group. Do not stop early. Continue expanding pillars and groups until this requirement is met. If output limit is reached, continue in the next response until all keyword groups are completed.
+Volume Requirement: Generate a minimum of 12 Keyword Groups (Level 2) max  keyword Group. Do not stop early. Continue expanding pillars and groups until this requirement is met. If output limit is reached, continue in the next response until all keyword groups are completed.
 Format: Your FINAL output must be ONLY a valid JSON object — no markdown, no tables, no prose, no explanations, no code fences, no ```json``` blocks. Do not output anything before or after the JSON. The response must start with { and end with }.
 Output JSON Schema:
 {

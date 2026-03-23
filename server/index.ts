@@ -92,15 +92,11 @@ app.get('/api/sse-test', (_req, res) => {
   _req.on('close', () => clearInterval(iv));
 });
 
-// Quick test: Claude API + MCP connection
+// Quick test: Claude API connection
 app.get('/api/test', async (_req, res) => {
   try {
     const Anthropic = (await import('@anthropic-ai/sdk')).default;
     const client = new Anthropic();
-    const { getMcpClient } = await import('./config/mcp.ts');
-
-    const mcpClient = await getMcpClient();
-    const { tools } = await mcpClient.listTools();
 
     const response = await client.messages.create({
       model: process.env.CLAUDE_MODEL || 'claude-sonnet-4-6',
@@ -116,8 +112,8 @@ app.get('/api/test', async (_req, res) => {
     res.json({
       claude: 'ok',
       response: text,
-      mcpTools: tools.map((t: any) => t.name),
       model: process.env.CLAUDE_MODEL,
+      mcp: 'client-side MCP (local)',
     });
   } catch (error) {
     res.status(500).json({ error: (error as Error).message });

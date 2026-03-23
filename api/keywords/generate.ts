@@ -1,6 +1,7 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { runAgent, AgentError } from '../_lib/agent.js';
 import { getKeywordGeneratorPrompt } from '../_lib/prompts.js';
+import { verifyDashVolumes } from '../_lib/volumeVerifier.js';
 
 function buildKeywordUserMessage(formData: Record<string, any>): string {
   const parts: string[] = [];
@@ -31,6 +32,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const systemPrompt = getKeywordGeneratorPrompt();
     const userMessage = buildKeywordUserMessage(formData);
     const result = await runAgent(systemPrompt, userMessage);
+    result.result = await verifyDashVolumes(result.result);
     res.json(result);
   } catch (err) {
     console.error('Keyword generation error:', err);

@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { runAgent, streamAgent, AgentError } from '../services/agent.ts';
 import { getKeywordGeneratorPrompt } from '../config/prompts.ts';
+import { verifyDashVolumes } from '../services/volumeVerifier.ts';
 
 export const keywordRouter = Router();
 
@@ -61,6 +62,8 @@ keywordRouter.post('/generate', async (req: Request, res: Response) => {
     const userMessage = buildKeywordUserMessage(formData);
 
     const result = await runAgent(systemPrompt, userMessage);
+    // Verify "-" volumes against DFS before returning
+    result.result = await verifyDashVolumes(result.result);
     res.json(result);
   } catch (err) {
     console.error('Keyword generation error:', err);
@@ -124,11 +127,15 @@ keywordRouter.post('/stream', async (req: Request, res: Response) => {
       onStatus: (status) => {
         send(`data: ${JSON.stringify({ type: 'status', content: status })}\n\n`);
       },
-      onDone: (result) => {
+      onDone: async (result) => {
         if (clientDisconnected) return;
-        // Result was already streamed via onText during Phase 2.
-        // Just signal completion.
-        send(`data: ${JSON.stringify({ type: 'done', result: '' })}\n\n`);
+        // Verify "-" volumes against DFS before signaling completion
+        try {
+          const verified = await verifyDashVolumes(result);
+          send(`data: ${JSON.stringify({ type: 'done', result: verified })}\n\n`);
+        } catch {
+          send(`data: ${JSON.stringify({ type: 'done', result })}\n\n`);
+        }
         res.end();
       },
       onError: (error) => {

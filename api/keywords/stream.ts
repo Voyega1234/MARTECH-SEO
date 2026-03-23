@@ -1,6 +1,7 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { streamAgent, AgentError } from '../_lib/agent.js';
 import { getKeywordGeneratorPrompt } from '../_lib/prompts.js';
+import { verifyDashVolumes } from '../_lib/volumeVerifier.js';
 
 export const config = {
   supportsResponseStreaming: true,
@@ -56,8 +57,13 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       onStatus: (status) => {
         send(`data: ${JSON.stringify({ type: 'status', content: status })}\n\n`);
       },
-      onDone: () => {
-        send(`data: ${JSON.stringify({ type: 'done', result: '' })}\n\n`);
+      onDone: async (result) => {
+        try {
+          const verified = await verifyDashVolumes(result);
+          send(`data: ${JSON.stringify({ type: 'done', result: verified })}\n\n`);
+        } catch {
+          send(`data: ${JSON.stringify({ type: 'done', result })}\n\n`);
+        }
         res.end();
       },
       onError: (error) => {

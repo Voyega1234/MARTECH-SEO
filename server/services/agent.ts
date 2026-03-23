@@ -18,9 +18,6 @@ function getClient(): Anthropic {
   return anthropic;
 }
 
-// Two models: fast for research, quality for output
-const RESEARCH_MODEL = 'claude-haiku-4-5-20251001';
-
 function getOutputModel(): string {
   return process.env.CLAUDE_MODEL || 'claude-sonnet-4-6';
 }
@@ -71,8 +68,8 @@ function classifyError(err: any): AgentError {
   }
 
   // 6. Network / timeout
-  if (msg.includes('ECONNREFUSED') || msg.includes('ENOTFOUND') || msg.includes('ETIMEDOUT') || msg.includes('fetch failed')) {
-    return new AgentError(msg, 'network_error', 'Cannot reach Claude API. Check your internet connection.', true);
+  if (msg.includes('ECONNREFUSED') || msg.includes('ENOTFOUND') || msg.includes('ETIMEDOUT') || msg.includes('fetch failed') || msg.includes('ECONNRESET') || msg.includes('terminated')) {
+    return new AgentError(msg, 'network_error', 'Connection to Claude API was interrupted. Retrying...', true);
   }
 
   // 7. MCP server connection failure
@@ -133,7 +130,7 @@ export function clearToolsCache() {
 function slimDfsKeywordResult(item: any): any {
   return {
     keyword: item.keyword,
-    search_volume: item.search_volume,
+    search_volume: item.keyword_info?.search_volume ?? item.search_volume ?? null,
   };
 }
 
@@ -225,22 +222,6 @@ function elapsed(startMs: number): string {
 }
 
 // --- Extract tool result data from conversation for Phase 2 ---
-function extractToolData(messages: any[]): string {
-  const toolResults: string[] = [];
-
-  for (const msg of messages) {
-    if (msg.role === 'user' && Array.isArray(msg.content)) {
-      for (const block of msg.content) {
-        if (block.type === 'tool_result' && block.content) {
-          toolResults.push(block.content);
-        }
-      }
-    }
-  }
-
-  return toolResults.join('\n\n---\n\n');
-}
-
 // --- Retry wrapper for Claude API calls ---
 async function callClaudeWithRetry<T>(
   fn: () => Promise<T>,
@@ -266,107 +247,8 @@ async function callClaudeWithRetry<T>(
   throw new AgentError('Unreachable', 'unknown', 'Unexpected error');
 }
 
-// --- Merge two keyword JSON results and deduplicate by url_slug ---
-function mergeKeywordResults(textA: string, textB: string): string {
-  try {
-    const parseJSON = (text: string) => {
-      // Try direct parse
-      try { return JSON.parse(text); } catch { /* */ }
-      // Brace-depth extraction
-      const lines = text.split('\n');
-      for (let i = 0; i < lines.length; i++) {
-        if (!lines[i].trim().startsWith('{')) continue;
-        const candidate = lines.slice(i).join('\n');
-        let depth = 0, end = -1;
-        for (let j = 0; j < candidate.length; j++) {
-          if (candidate[j] === '{') depth++;
-          else if (candidate[j] === '}') { depth--; if (depth === 0) { end = j; break; } }
-        }
-        if (end > 0) {
-          try { return JSON.parse(candidate.slice(0, end + 1)); } catch { /* */ }
-        }
-      }
-      return null;
-    };
-
-    const a = parseJSON(textA);
-    const b = parseJSON(textB);
-
-    if (!a?.product_lines && !b?.product_lines) {
-      console.warn('[Merge] Neither result has product_lines — returning A as-is');
-      return textA;
-    }
-    if (!a?.product_lines) return JSON.stringify(b);
-    if (!b?.product_lines) return JSON.stringify(a);
-
-    // Merge: combine pillars from both results, dedup by url_slug
-    const seenSlugs = new Set<string>();
-    const merged = { ...a };
-
-    for (const pl of merged.product_lines) {
-      for (const pillar of pl.topic_pillars) {
-        pillar.keyword_groups = pillar.keyword_groups.filter((g: any) => {
-          if (seenSlugs.has(g.url_slug)) return false;
-          seenSlugs.add(g.url_slug);
-          return true;
-        });
-      }
-    }
-
-    // Add pillars from B that don't exist in A
-    for (const plB of b.product_lines) {
-      let targetPl = merged.product_lines.find((pl: any) => pl.product_line === plB.product_line);
-      if (!targetPl) {
-        targetPl = { product_line: plB.product_line, topic_pillars: [] };
-        merged.product_lines.push(targetPl);
-      }
-
-      for (const pillarB of plB.topic_pillars) {
-        const existingPillar = targetPl.topic_pillars.find(
-          (p: any) => p.topic_pillar === pillarB.topic_pillar
-        );
-
-        if (existingPillar) {
-          // Add non-duplicate groups
-          for (const group of pillarB.keyword_groups) {
-            if (!seenSlugs.has(group.url_slug)) {
-              seenSlugs.add(group.url_slug);
-              existingPillar.keyword_groups.push(group);
-            }
-          }
-        } else {
-          // New pillar — add all non-duplicate groups
-          const newPillar = { ...pillarB, keyword_groups: [] as any[] };
-          for (const group of pillarB.keyword_groups) {
-            if (!seenSlugs.has(group.url_slug)) {
-              seenSlugs.add(group.url_slug);
-              newPillar.keyword_groups.push(group);
-            }
-          }
-          if (newPillar.keyword_groups.length > 0) {
-            targetPl.topic_pillars.push(newPillar);
-          }
-        }
-      }
-    }
-
-    // Count total groups
-    let totalGroups = 0;
-    for (const pl of merged.product_lines) {
-      for (const pillar of pl.topic_pillars) {
-        totalGroups += pillar.keyword_groups.length;
-      }
-    }
-    console.log(`[Merge] Combined: ${totalGroups} unique keyword groups (deduped by url_slug)`);
-
-    return JSON.stringify(merged);
-  } catch (err) {
-    console.error('[Merge] Failed to merge — returning A as-is:', (err as Error).message);
-    return textA;
-  }
-}
-
-// Non-streaming (uses two-model approach)
+// Single-phase agent: Sonnet + MCP (like Claude Desktop)
+// One model does research AND generation in the same conversation.
 export async function runAgent(
   systemPrompt: string,
   userMessage: string,
@@ -378,46 +260,54 @@ export async function runAgent(
   const outputModel = getOutputModel();
   const allToolsUsed: string[] = [];
 
+  const jsonEnforcement = '\n\nCRITICAL: Your FINAL response must be ONLY a valid JSON object — no markdown, no code fences, no text before or after. Start with { and end with }.';
+
   let messages: any[] = [{ role: 'user', content: userMessage }];
   let loopCount = 0;
-  const maxLoops = 8;
-  let totalResearchTime = 0;
+  const maxLoops = 15;
   let totalToolTime = 0;
 
-  // ===== Phase 1: Research with Haiku =====
-  console.log(`\n[Agent] Phase 1: Research with ${RESEARCH_MODEL}`);
-
-  const researchSystemPrompt = systemPrompt + `\n\nIMPORTANT: You are in RESEARCH PHASE. Your job is to gather keyword data using DFS tools. Do NOT produce the final JSON output yet. Just call the necessary tools to collect keyword and volume data. Be efficient — batch queries, avoid duplicate calls, aim for 5-8 tool calls total.`;
+  console.log(`\n[Agent] Single-phase with ${outputModel} + MCP tools`);
 
   while (loopCount < maxLoops) {
     loopCount++;
 
     const claudeStart = Date.now();
-    // Use streaming to avoid Anthropic SDK timeout on long requests
     const response = await callClaudeWithRetry(
       async () => {
         const stream = client.beta.messages.stream({
-          model: RESEARCH_MODEL,
-          max_tokens: 4000,
-          system: researchSystemPrompt,
+          model: outputModel,
+          max_tokens: 64000,
+          system: systemPrompt + jsonEnforcement,
           messages,
           tools,
           betas: ['mcp-client-2025-11-20'],
         });
         return stream.finalMessage();
       },
-      `Agent-Research-Loop-${loopCount}`
+      `Agent-Loop-${loopCount}`
     );
     const claudeMs = Date.now() - claudeStart;
-    totalResearchTime += claudeMs;
 
-    console.log(`[Agent] Research loop ${loopCount} | Haiku: ${(claudeMs / 1000).toFixed(1)}s | Tokens: ${JSON.stringify(response.usage)}`);
+    console.log(`[Agent] Loop ${loopCount} | ${outputModel}: ${(claudeMs / 1000).toFixed(1)}s | Stop: ${response.stop_reason} | Tokens: ${JSON.stringify(response.usage)}`);
 
+    // If model finished (end_turn), extract the text output
+    if (response.stop_reason === 'end_turn') {
+      const textBlocks = response.content.filter((b: any) => b.type === 'text');
+      const fullText = textBlocks.map((b: any) => b.text).join('');
+      console.log(`[Agent] Done | ${loopCount} loops | Tools: ${(totalToolTime / 1000).toFixed(1)}s | Total: ${elapsed(totalStart)}`);
+      return { success: true, result: fullText, toolsUsed: allToolsUsed };
+    }
+
+    // Handle tool calls
     const toolUseBlocks = response.content.filter((b: any) => b.type === 'tool_use');
 
-    if (toolUseBlocks.length === 0 || response.stop_reason === 'end_turn') {
-      console.log('[Agent] Research phase complete — no more tool calls');
-      break;
+    if (toolUseBlocks.length === 0) {
+      // No tool calls and not end_turn — extract whatever text we have
+      const textBlocks = response.content.filter((b: any) => b.type === 'text');
+      const fullText = textBlocks.map((b: any) => b.text).join('');
+      console.log(`[Agent] Done (no tools, stop: ${response.stop_reason}) | Total: ${elapsed(totalStart)}`);
+      return { success: true, result: fullText, toolsUsed: allToolsUsed };
     }
 
     messages.push({ role: 'assistant', content: response.content });
@@ -444,53 +334,16 @@ export async function runAgent(
     messages.push({ role: 'user', content: toolResults });
   }
 
-  // ===== Phase 2: Generate with Sonnet (parallel split by intent) =====
-  console.log(`\n[Agent] Phase 2: Generate with ${outputModel} (parallel split)`);
+  // If we hit maxLoops, extract whatever text is in the last assistant message
+  console.warn(`[Agent] Hit max loops (${maxLoops})`);
+  const lastAssistant = messages.filter((m: any) => m.role === 'assistant').pop();
+  const fallbackText = lastAssistant?.content
+    ?.filter((b: any) => b.type === 'text')
+    ?.map((b: any) => b.text)
+    ?.join('') || '';
 
-  const collectedData = extractToolData(messages);
-
-  if (!collectedData.trim()) {
-    console.warn('[Agent] No tool data collected — Phase 1 may have failed silently');
-  }
-
-  const generateStart = Date.now();
-  const jsonEnforcement = '\n\nCRITICAL: Your response must be ONLY a raw JSON object. Start with { and end with }. No markdown, no code fences, no text before or after. Output pure JSON only.';
-  const baseContent = `${userMessage}\n\n--- KEYWORD DATA (from DFS research) ---\n${collectedData}`;
-
-  // Split into 2 parallel calls by intent type
-  const generateCall = (intentFilter: string, label: string) => {
-    let text = '';
-    const s = client.messages.stream({
-      model: outputModel,
-      max_tokens: 40000,
-      system: systemPrompt + jsonEnforcement,
-      messages: [
-        {
-          role: 'user',
-          content: `${baseContent}\n\nIMPORTANT: For this batch, generate keyword groups ONLY for ${intentFilter} intent pillars. Generate at least 50 keyword groups. Do NOT include pillars with other intent types.\n\nRemember: Output ONLY the JSON object. Start with { and end with }.`,
-        },
-      ],
-    });
-    s.on('text', (t) => { text += t; });
-    return s.finalMessage().then((resp) => {
-      console.log(`[Agent] ${label}: ${((Date.now() - generateStart) / 1000).toFixed(1)}s | Tokens: ${JSON.stringify(resp.usage)}`);
-      return text;
-    });
-  };
-
-  const [textA, textB] = await Promise.all([
-    generateCall('Transactional and Commercial', 'Generate-A (Trans+Comm)'),
-    generateCall('Informational', 'Generate-B (Info)'),
-  ]);
-
-  // Merge and deduplicate results
-  const fullText = mergeKeywordResults(textA, textB);
-
-  const generateMs = Date.now() - generateStart;
-  console.log(`[Agent] Generate total: ${(generateMs / 1000).toFixed(1)}s`);
-  console.log(`[Agent] Done | Research: ${(totalResearchTime / 1000).toFixed(1)}s | Tools: ${(totalToolTime / 1000).toFixed(1)}s | Generate: ${(generateMs / 1000).toFixed(1)}s | Total: ${elapsed(totalStart)}`);
-
-  return { success: true, result: fullText, toolsUsed: allToolsUsed };
+  console.log(`[Agent] Done (max loops) | Total: ${elapsed(totalStart)}`);
+  return { success: true, result: fallbackText, toolsUsed: allToolsUsed };
 }
 
 // Generate-only (no research phase) — for sitemap where keyword data is already available
@@ -527,7 +380,7 @@ export async function generateOnly(
   return { success: true, result: fullText, toolsUsed: [] };
 }
 
-// Streaming version with two-model approach
+// Streaming single-phase agent: Sonnet + MCP
 export async function streamAgent(
   systemPrompt: string,
   userMessage: string,
@@ -542,95 +395,93 @@ export async function streamAgent(
   const totalStart = Date.now();
   let heartbeat: ReturnType<typeof setInterval> | null = null;
 
-  // Wrap entire flow in try/catch for top-level errors
   try {
     const tools = await getTools();
-
     const client = getClient();
     const outputModel = getOutputModel();
 
+    const jsonEnforcement = '\n\nCRITICAL: Your FINAL response must be ONLY a valid JSON object — no markdown, no code fences, no text before or after. Start with { and end with }.';
+
     let messages: any[] = [{ role: 'user', content: userMessage }];
     let loopCount = 0;
-    const maxLoops = 8;
-    let totalResearchTime = 0;
+    const maxLoops = 15;
     let totalToolTime = 0;
     let consecutiveFailedLoops = 0;
-
-    console.log('\n========================================');
-    console.log('[Stream] Phase 1: RESEARCH with', RESEARCH_MODEL);
-    console.log('[Stream] Phase 2 will use:', outputModel);
-    console.log('[Stream] User message:', userMessage.length, 'chars');
-    console.log('========================================\n');
-
-    // ===== Phase 1: Research with Haiku =====
-    const researchSystemPrompt = systemPrompt + `\n\nIMPORTANT: You are in RESEARCH PHASE. Your job is to gather keyword data using DFS tools. Do NOT produce the final JSON output yet. Just call the necessary tools to collect keyword and volume data. Be efficient — batch queries, avoid duplicate calls, aim for 5-8 tool calls total.`;
 
     const status = (msg: string) => {
       if (callbacks.onStatus) callbacks.onStatus(msg);
       else callbacks.onText(msg);
     };
 
-    status('[Researching keywords with DFS tools...]\n');
+    console.log('\n========================================');
+    console.log(`[Stream] Single-phase with ${outputModel} + MCP`);
+    console.log('========================================\n');
 
-    // Heartbeat: send a status event every 15s during long-running operations
-    // This keeps the SSE connection alive and flushes any proxy/OS buffers
-    heartbeat = setInterval(() => {
-      status('');  // empty status keeps connection alive
-    }, 15_000);
+    // Heartbeat: keep SSE connection alive
+    heartbeat = setInterval(() => { status(''); }, 15_000);
 
     while (loopCount < maxLoops) {
       loopCount++;
-      console.log(`\n[Stream] --- Research Loop ${loopCount}/${maxLoops} ---`);
-      status(`\n[Research loop ${loopCount}...]\n`);
-
-      const claudeStart = Date.now();
 
       let response;
       try {
         response = await callClaudeWithRetry(
           async () => {
             const s = client.beta.messages.stream({
-              model: RESEARCH_MODEL,
-              max_tokens: 4000,
-              system: researchSystemPrompt,
+              model: outputModel,
+              max_tokens: 64000,
+              system: systemPrompt + jsonEnforcement,
               messages,
               tools,
               betas: ['mcp-client-2025-11-20'],
             });
             return s.finalMessage();
           },
-          `Stream-Research-Loop-${loopCount}`
+          `Stream-Loop-${loopCount}`
         );
       } catch (err) {
         const classified = err instanceof AgentError ? err : classifyError(err);
-        console.error(`[Stream] Research loop ${loopCount} failed: ${classified.code}`);
+        console.error(`[Stream] Loop ${loopCount} failed: ${classified.code}`);
 
-        // If retryable and we haven't failed too many times, skip this loop
         consecutiveFailedLoops++;
         if (classified.retryable && consecutiveFailedLoops < 3) {
-          status(`\n[Retrying research... (${classified.code})]\n`);
+          status(`\n[Retrying... (${classified.code})]\n`);
           continue;
         }
-
-        // Non-retryable or too many failures — proceed to Phase 2 with whatever data we have
-        console.warn('[Stream] Proceeding to Phase 2 with partial data');
-        status(`\n[Research interrupted: ${classified.userMessage}. Generating with available data...]\n`);
-        break;
+        throw classified;
       }
 
       consecutiveFailedLoops = 0;
-      const claudeMs = Date.now() - claudeStart;
-      totalResearchTime += claudeMs;
+      console.log(`[Stream] Loop ${loopCount} | Stop: ${response.stop_reason} | Tokens: ${JSON.stringify(response.usage)}`);
 
-      console.log(`[Stream] Haiku: ${(claudeMs / 1000).toFixed(1)}s | Stop: ${response.stop_reason} | Tokens: ${JSON.stringify(response.usage)}`);
+      // If model finished, extract text output
+      if (response.stop_reason === 'end_turn' || response.stop_reason === 'max_tokens') {
+        const textBlocks = response.content.filter((b: any) => b.type === 'text');
+        const fullText = textBlocks.map((b: any) => b.text).join('');
 
+        if (response.stop_reason === 'max_tokens') {
+          status('\n\n[Warning: Output was truncated. Try with fewer product lines.]');
+        }
+
+        console.log('\n========================================');
+        console.log(`[Stream] DONE | ${loopCount} loops | Tools: ${(totalToolTime / 1000).toFixed(1)}s | Total: ${elapsed(totalStart)}`);
+        console.log(`[Stream] Output: ${fullText.length} chars`);
+        console.log('========================================\n');
+
+        if (heartbeat) clearInterval(heartbeat);
+        callbacks.onDone(fullText);
+        return;
+      }
+
+      // Handle tool calls
       const toolUseBlocks = response.content.filter((b: any) => b.type === 'tool_use');
 
-      console.log(`[Stream] Tool calls: ${toolUseBlocks.length}`);
-
-      if (toolUseBlocks.length === 0 || response.stop_reason === 'end_turn') {
-        console.log('[Stream] Research phase complete');
-        break;
+      if (toolUseBlocks.length === 0) {
+        const textBlocks = response.content.filter((b: any) => b.type === 'text');
+        const fullText = textBlocks.map((b: any) => b.text).join('');
+        if (heartbeat) clearInterval(heartbeat);
+        callbacks.onDone(fullText);
+        return;
       }
 
       messages.push({ role: 'assistant', content: response.content });
@@ -657,67 +508,16 @@ export async function streamAgent(
       messages.push({ role: 'user', content: toolResults });
     }
 
-    // ===== Phase 2: Generate with Sonnet (streamed) =====
-    console.log(`\n========================================`);
-    console.log(`[Stream] Phase 2: GENERATE with ${outputModel}`);
-    console.log(`========================================\n`);
-
-    status('\n[Generating keyword map...]\n');
-
-    const collectedData = extractToolData(messages);
-    console.log(`[Stream] Collected data: ${collectedData.length} chars from tool results`);
-
-    if (!collectedData.trim()) {
-      console.warn('[Stream] No tool data collected — output may lack volume data');
-      status('[Warning: No keyword data collected from DFS. Output may have estimated volumes.]\n');
-    }
-
-    let fullText = '';
-    const generateStart = Date.now();
-
-    const stream = client.messages.stream({
-      model: outputModel,
-      max_tokens: 64000,
-      system: systemPrompt + '\n\nCRITICAL: Your response must be ONLY a raw JSON object. Start with { and end with }. No markdown, no code fences, no text before or after. Output pure JSON only.',
-      messages: [
-        {
-          role: 'user',
-          content: `${userMessage}\n\n--- KEYWORD DATA (from DFS research) ---\n${collectedData}\n\nRemember: Output ONLY the JSON object. No text, no markdown, no explanation. Start with { and end with }.`,
-        },
-      ],
-    });
-
-    // Handle stream-level errors
-    stream.on('error', (err) => {
-      const classified = classifyError(err);
-      console.error(`[Stream] Stream error: ${classified.code} — ${classified.message}`);
-    });
-
-    const response = await stream.on('text', (text) => {
-      fullText += text;
-      callbacks.onText(text);
-    }).finalMessage();
-
-    const generateMs = Date.now() - generateStart;
-
-    // Validate output
-    if (response.stop_reason === 'max_tokens') {
-      console.warn('[Stream] Output was truncated (max_tokens reached)');
-      status('\n\n[Warning: Output was truncated. Try with fewer product lines.]');
-    }
-
-    console.log('\n========================================');
-    console.log('[Stream] DONE');
-    console.log(`[Stream] Research (Haiku): ${loopCount} loops, ${(totalResearchTime / 1000).toFixed(1)}s`);
-    console.log(`[Stream] Tools (DFS): ${(totalToolTime / 1000).toFixed(1)}s`);
-    console.log(`[Stream] Generate (${outputModel}): ${(generateMs / 1000).toFixed(1)}s`);
-    console.log(`[Stream] Wall time: ${elapsed(totalStart)}`);
-    console.log(`[Stream] Output: ${fullText.length} chars`);
-    console.log(`[Stream] Tokens: ${JSON.stringify(response.usage)}`);
-    console.log('========================================\n');
+    // Hit max loops — extract last text
+    console.warn(`[Stream] Hit max loops (${maxLoops})`);
+    const lastAssistant = messages.filter((m: any) => m.role === 'assistant').pop();
+    const fallbackText = lastAssistant?.content
+      ?.filter((b: any) => b.type === 'text')
+      ?.map((b: any) => b.text)
+      ?.join('') || '';
 
     if (heartbeat) clearInterval(heartbeat);
-    callbacks.onDone(fullText);
+    callbacks.onDone(fallbackText);
 
   } catch (err) {
     if (heartbeat) clearInterval(heartbeat);

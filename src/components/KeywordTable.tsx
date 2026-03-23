@@ -2,7 +2,7 @@ import { useState, useMemo } from 'react';
 
 interface Keyword {
   keyword: string;
-  volume: number;
+  volume: number | string;
 }
 
 interface KeywordGroup {
@@ -111,7 +111,7 @@ export function KeywordTable({ data, projectName }: { data: string; projectName?
     for (const pl of parsed.product_lines) {
       for (const pillar of pl.topic_pillars) {
         for (const group of pillar.keyword_groups) {
-          const totalVolume = group.keywords.reduce((s, k) => s + k.volume, 0);
+          const totalVolume = group.keywords.reduce((s, k) => s + (typeof k.volume === 'number' ? k.volume : 0), 0);
           rows.push({
             productLine: pl.product_line,
             pillar: pillar.topic_pillar,
@@ -275,7 +275,7 @@ export function KeywordTable({ data, projectName }: { data: string; projectName?
                         <span key={ki} className="inline mr-1">
                           {kw.keyword}{' '}
                           <span className="font-mono text-[11px] text-[#aeaeb2] bg-[#f5f5f7] px-1 py-px rounded border border-[#e8e8ed] whitespace-nowrap">
-                            {kw.volume.toLocaleString()}
+                            {typeof kw.volume === 'number' ? kw.volume.toLocaleString() : kw.volume}
                           </span>{' '}
                         </span>
                       ))}
