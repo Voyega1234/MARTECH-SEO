@@ -230,11 +230,11 @@ export default function App() {
     e.preventDefault();
 
     // If project already has keyword results, ask user what to do
-    if (projectId && hasKeywords && !showRegenDialog) {
-      pendingGenerateRef.current = e;
+    if (projectId && hasKeywords && !skipRegenCheckRef.current) {
       setShowRegenDialog(true);
       return;
     }
+    skipRegenCheckRef.current = false;
 
     setShowRegenDialog(false);
     setGenerating('keywords');
@@ -434,7 +434,7 @@ export default function App() {
 
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
   const [showRegenDialog, setShowRegenDialog] = useState(false);
-  const pendingGenerateRef = useRef<React.FormEvent | null>(null);
+  const skipRegenCheckRef = useRef(false);
 
   const handleDeleteProject = async (id: string) => {
     try {
@@ -452,13 +452,16 @@ export default function App() {
     setKeywordResult('');
     setSitemapResult('');
     setShowRegenDialog(false);
-    // Trigger generate directly (bypass the hasKeywords check)
-    const fakeEvent = { preventDefault: () => {} } as React.FormEvent;
-    handleGenerate(fakeEvent);
+    skipRegenCheckRef.current = true;
+    // Trigger via form submit after state clears
+    setTimeout(() => {
+      const form = document.querySelector('form');
+      if (form) form.requestSubmit();
+    }, 0);
   };
 
   // Regen dialog: create new version with numbered name
-  const handleRegenNewVersion = async () => {
+  const handleRegenNewVersion = () => {
     const baseName = formData.businessName || 'Project';
     // Find existing projects with same base name to determine version number
     const existingVersions = projects.filter((p) => {
@@ -473,10 +476,11 @@ export default function App() {
     setKeywordResult('');
     setSitemapResult('');
     setShowRegenDialog(false);
-    // Use setTimeout to let state update before triggering generate
+    skipRegenCheckRef.current = true;
+    // Trigger via form submit after state clears
     setTimeout(() => {
-      const fakeEvent = { preventDefault: () => {} } as React.FormEvent;
-      handleGenerate(fakeEvent);
+      const form = document.querySelector('form');
+      if (form) form.requestSubmit();
     }, 0);
   };
 

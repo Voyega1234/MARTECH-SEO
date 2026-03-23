@@ -134,9 +134,6 @@ function slimDfsKeywordResult(item: any): any {
   return {
     keyword: item.keyword,
     search_volume: item.search_volume,
-    competition: item.competition,
-    cpc: item.cpc,
-    ...(item.keyword_difficulty !== undefined && { keyword_difficulty: item.keyword_difficulty }),
   };
 }
 
@@ -269,6 +266,106 @@ async function callClaudeWithRetry<T>(
   throw new AgentError('Unreachable', 'unknown', 'Unexpected error');
 }
 
+// --- Merge two keyword JSON results and deduplicate by url_slug ---
+function mergeKeywordResults(textA: string, textB: string): string {
+  try {
+    const parseJSON = (text: string) => {
+      // Try direct parse
+      try { return JSON.parse(text); } catch { /* */ }
+      // Brace-depth extraction
+      const lines = text.split('\n');
+      for (let i = 0; i < lines.length; i++) {
+        if (!lines[i].trim().startsWith('{')) continue;
+        const candidate = lines.slice(i).join('\n');
+        let depth = 0, end = -1;
+        for (let j = 0; j < candidate.length; j++) {
+          if (candidate[j] === '{') depth++;
+          else if (candidate[j] === '}') { depth--; if (depth === 0) { end = j; break; } }
+        }
+        if (end > 0) {
+          try { return JSON.parse(candidate.slice(0, end + 1)); } catch { /* */ }
+        }
+      }
+      return null;
+    };
+
+    const a = parseJSON(textA);
+    const b = parseJSON(textB);
+
+    if (!a?.product_lines && !b?.product_lines) {
+      console.warn('[Merge] Neither result has product_lines — returning A as-is');
+      return textA;
+    }
+    if (!a?.product_lines) return JSON.stringify(b);
+    if (!b?.product_lines) return JSON.stringify(a);
+
+    // Merge: combine pillars from both results, dedup by url_slug
+    const seenSlugs = new Set<string>();
+    const merged = { ...a };
+
+    for (const pl of merged.product_lines) {
+      for (const pillar of pl.topic_pillars) {
+        pillar.keyword_groups = pillar.keyword_groups.filter((g: any) => {
+          if (seenSlugs.has(g.url_slug)) return false;
+          seenSlugs.add(g.url_slug);
+          return true;
+        });
+      }
+    }
+
+    // Add pillars from B that don't exist in A
+    for (const plB of b.product_lines) {
+      let targetPl = merged.product_lines.find((pl: any) => pl.product_line === plB.product_line);
+      if (!targetPl) {
+        targetPl = { product_line: plB.product_line, topic_pillars: [] };
+        merged.product_lines.push(targetPl);
+      }
+
+      for (const pillarB of plB.topic_pillars) {
+        const existingPillar = targetPl.topic_pillars.find(
+          (p: any) => p.topic_pillar === pillarB.topic_pillar
+        );
+
+        if (existingPillar) {
+          // Add non-duplicate groups
+          for (const group of pillarB.keyword_groups) {
+            if (!seenSlugs.has(group.url_slug)) {
+              seenSlugs.add(group.url_slug);
+              existingPillar.keyword_groups.push(group);
+            }
+          }
+        } else {
+          // New pillar — add all non-duplicate groups
+          const newPillar = { ...pillarB, keyword_groups: [] as any[] };
+          for (const group of pillarB.keyword_groups) {
+            if (!seenSlugs.has(group.url_slug)) {
+              seenSlugs.add(group.url_slug);
+              newPillar.keyword_groups.push(group);
+            }
+          }
+          if (newPillar.keyword_groups.length > 0) {
+            targetPl.topic_pillars.push(newPillar);
+          }
+        }
+      }
+    }
+
+    // Count total groups
+    let totalGroups = 0;
+    for (const pl of merged.product_lines) {
+      for (const pillar of pl.topic_pillars) {
+        totalGroups += pillar.keyword_groups.length;
+      }
+    }
+    console.log(`[Merge] Combined: ${totalGroups} unique keyword groups (deduped by url_slug)`);
+
+    return JSON.stringify(merged);
+  } catch (err) {
+    console.error('[Merge] Failed to merge — returning A as-is:', (err as Error).message);
+    return textA;
+  }
+}
+
 // Non-streaming (uses two-model approach)
 export async function runAgent(
   systemPrompt: string,
@@ -283,7 +380,7 @@ export async function runAgent(
 
   let messages: any[] = [{ role: 'user', content: userMessage }];
   let loopCount = 0;
-  const maxLoops = 15;
+  const maxLoops = 8;
   let totalResearchTime = 0;
   let totalToolTime = 0;
 
@@ -347,8 +444,8 @@ export async function runAgent(
     messages.push({ role: 'user', content: toolResults });
   }
 
-  // ===== Phase 2: Generate with Sonnet =====
-  console.log(`\n[Agent] Phase 2: Generate with ${outputModel}`);
+  // ===== Phase 2: Generate with Sonnet (parallel split by intent) =====
+  console.log(`\n[Agent] Phase 2: Generate with ${outputModel} (parallel split)`);
 
   const collectedData = extractToolData(messages);
 
@@ -357,34 +454,40 @@ export async function runAgent(
   }
 
   const generateStart = Date.now();
+  const jsonEnforcement = '\n\nCRITICAL: Your response must be ONLY a raw JSON object. Start with { and end with }. No markdown, no code fences, no text before or after. Output pure JSON only.';
+  const baseContent = `${userMessage}\n\n--- KEYWORD DATA (from DFS research) ---\n${collectedData}`;
 
-  // Use streaming internally to avoid Anthropic SDK timeout on long requests
-  let fullText = '';
-  const stream = client.beta.messages.stream({
-    model: outputModel,
-    max_tokens: 64000,
-    system: systemPrompt + '\n\nCRITICAL: Your response must be ONLY a raw JSON object. Start with { and end with }. No markdown, no code fences, no text before or after. Output pure JSON only.',
-    messages: [
-      {
-        role: 'user',
-        content: `${userMessage}\n\n--- KEYWORD DATA (from DFS research) ---\n${collectedData}\n\nRemember: Output ONLY the JSON object. No text, no markdown, no explanation. Start with { and end with }.`,
-      },
-    ],
-    betas: ['mcp-client-2025-11-20'],
-  });
+  // Split into 2 parallel calls by intent type
+  const generateCall = (intentFilter: string, label: string) => {
+    let text = '';
+    const s = client.messages.stream({
+      model: outputModel,
+      max_tokens: 40000,
+      system: systemPrompt + jsonEnforcement,
+      messages: [
+        {
+          role: 'user',
+          content: `${baseContent}\n\nIMPORTANT: For this batch, generate keyword groups ONLY for ${intentFilter} intent pillars. Generate at least 50 keyword groups. Do NOT include pillars with other intent types.\n\nRemember: Output ONLY the JSON object. Start with { and end with }.`,
+        },
+      ],
+    });
+    s.on('text', (t) => { text += t; });
+    return s.finalMessage().then((resp) => {
+      console.log(`[Agent] ${label}: ${((Date.now() - generateStart) / 1000).toFixed(1)}s | Tokens: ${JSON.stringify(resp.usage)}`);
+      return text;
+    });
+  };
 
-  const generateResponse = await stream.on('text', (text) => {
-    fullText += text;
-  }).finalMessage();
+  const [textA, textB] = await Promise.all([
+    generateCall('Transactional and Commercial', 'Generate-A (Trans+Comm)'),
+    generateCall('Informational', 'Generate-B (Info)'),
+  ]);
+
+  // Merge and deduplicate results
+  const fullText = mergeKeywordResults(textA, textB);
 
   const generateMs = Date.now() - generateStart;
-
-  // Validate output is JSON
-  if (!fullText.trim().startsWith('{')) {
-    console.warn('[Agent] Output does not look like JSON — may need re-generation');
-  }
-
-  console.log(`[Agent] Generate: ${(generateMs / 1000).toFixed(1)}s | Tokens: ${JSON.stringify(generateResponse.usage)}`);
+  console.log(`[Agent] Generate total: ${(generateMs / 1000).toFixed(1)}s`);
   console.log(`[Agent] Done | Research: ${(totalResearchTime / 1000).toFixed(1)}s | Tools: ${(totalToolTime / 1000).toFixed(1)}s | Generate: ${(generateMs / 1000).toFixed(1)}s | Total: ${elapsed(totalStart)}`);
 
   return { success: true, result: fullText, toolsUsed: allToolsUsed };
@@ -419,7 +522,6 @@ export async function generateOnly(
   }).finalMessage();
 
   const generateMs = Date.now() - totalStart;
-
   console.log(`[Agent-GenerateOnly] Done: ${(generateMs / 1000).toFixed(1)}s | Tokens: ${JSON.stringify(response.usage)}`);
 
   return { success: true, result: fullText, toolsUsed: [] };
@@ -449,7 +551,7 @@ export async function streamAgent(
 
     let messages: any[] = [{ role: 'user', content: userMessage }];
     let loopCount = 0;
-    const maxLoops = 15;
+    const maxLoops = 8;
     let totalResearchTime = 0;
     let totalToolTime = 0;
     let consecutiveFailedLoops = 0;
@@ -573,7 +675,7 @@ export async function streamAgent(
     let fullText = '';
     const generateStart = Date.now();
 
-    const stream = client.beta.messages.stream({
+    const stream = client.messages.stream({
       model: outputModel,
       max_tokens: 64000,
       system: systemPrompt + '\n\nCRITICAL: Your response must be ONLY a raw JSON object. Start with { and end with }. No markdown, no code fences, no text before or after. Output pure JSON only.',
@@ -583,7 +685,6 @@ export async function streamAgent(
           content: `${userMessage}\n\n--- KEYWORD DATA (from DFS research) ---\n${collectedData}\n\nRemember: Output ONLY the JSON object. No text, no markdown, no explanation. Start with { and end with }.`,
         },
       ],
-      betas: ['mcp-client-2025-11-20'],
     });
 
     // Handle stream-level errors

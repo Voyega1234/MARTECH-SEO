@@ -60,7 +60,7 @@ Keyword Group (L2): Each must be a specific search intent. No placeholders.
 Slug: Create SEO-friendly English slugs.
 Keywords (L3): Provide all relevant variations including synonyms, typos, long-tail variations, or similar keywords that can be grouped together within the same slug. There is no set limit on the number of variations—provide as many as are relevant to the topic. Also next to each keyword, provide the search volume of that keyword (extracted from DFS MCP for exact search volume - do not give estimates). If the primary keyword data source returns 0, blank, or N/A, put in -. Check historical data if available to retrieve the last known non-zero value.
 
-Volume Requirement: Generate a minimum of 100 Keyword Groups (Level 2). Do not stop early. Continue expanding pillars and groups until this requirement is met. If output limit is reached, continue in the next response until all keyword groups are completed.
+Volume Requirement: Generate a minimum of 100 Keyword Groups (Level 2) max 200 keyword Group. Do not stop early. Continue expanding pillars and groups until this requirement is met. If output limit is reached, continue in the next response until all keyword groups are completed.
 Format: Your FINAL output must be ONLY a valid JSON object — no markdown, no tables, no prose, no explanations, no code fences, no ```json``` blocks. Do not output anything before or after the JSON. The response must start with { and end with }.
 Output JSON Schema:
 {
