@@ -100,11 +100,8 @@ function downloadCsv(filename: string, csvContent: string) {
   URL.revokeObjectURL(url);
 }
 
-type FilterType = 'all' | 'high-conv' | 'high-traffic';
-
 export function KeywordTable({ data, projectName }: { data: string; projectName?: string }) {
   const [search, setSearch] = useState('');
-  const [filter, setFilter] = useState<FilterType>('all');
 
   const parsed = tryParseJSON(data);
 
@@ -131,27 +128,16 @@ export function KeywordTable({ data, projectName }: { data: string; projectName?
   }, [parsed]);
 
   const filteredRows = useMemo(() => {
-    let rows = allRows;
-
-    if (search.trim()) {
-      const q = search.toLowerCase();
-      rows = rows.filter(
-        (r) =>
-          r.group.toLowerCase().includes(q) ||
-          r.pillar.toLowerCase().includes(q) ||
-          r.productLine.toLowerCase().includes(q) ||
-          r.keywords.some((k) => k.keyword.toLowerCase().includes(q))
-      );
-    }
-
-    if (filter === 'high-conv') {
-      rows = rows.filter((r) => r.intent === 'Transactional');
-    } else if (filter === 'high-traffic') {
-      rows = rows.filter((r) => r.totalVolume >= 3000);
-    }
-
-    return rows;
-  }, [allRows, search, filter]);
+    if (!search.trim()) return allRows;
+    const q = search.toLowerCase();
+    return allRows.filter(
+      (r) =>
+        r.group.toLowerCase().includes(q) ||
+        r.pillar.toLowerCase().includes(q) ||
+        r.productLine.toLowerCase().includes(q) ||
+        r.keywords.some((k) => k.keyword.toLowerCase().includes(q))
+    );
+  }, [allRows, search]);
 
   const exportCsv = () => {
     const header = ['Product Line', 'Topic Pillar', 'Intent', 'Keyword Group', 'URL Slug', 'Keyword', 'Volume'];
@@ -217,22 +203,6 @@ export function KeywordTable({ data, projectName }: { data: string; projectName?
             className="bg-[#f5f5f7] border border-[#d2d2d7] rounded-lg py-[7px] pl-8 pr-3 text-[13px] text-[#1d1d1f] outline-none w-60 transition-all focus:border-[#0071e3] focus:shadow-[0_0_0_3px_rgba(0,113,227,0.1)]"
           />
         </div>
-
-        <div className="w-px h-5 bg-[#d2d2d7]" />
-
-        {(['all', 'high-conv', 'high-traffic'] as FilterType[]).map((f) => (
-          <button
-            key={f}
-            onClick={() => setFilter(f)}
-            className={`px-3 py-1 rounded-[20px] text-[12px] font-medium border transition-all cursor-pointer ${
-              filter === f
-                ? 'bg-[#0071e3] text-white border-[#0071e3]'
-                : 'bg-white text-[#6e6e73] border-[#d2d2d7] hover:border-[#0071e3] hover:text-[#0071e3]'
-            }`}
-          >
-            {f === 'all' ? 'All' : f === 'high-conv' ? 'High Conv.' : 'High Traffic'}
-          </button>
-        ))}
 
         <div className="ml-auto flex items-center gap-2">
           <span className="text-[12px] text-[#aeaeb2] font-mono">{filteredRows.length} groups</span>

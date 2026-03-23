@@ -149,7 +149,7 @@ function potentialBadge(level: string) {
 type ViewMode = 'cards' | 'table';
 
 export function SitemapTable({ data, projectName }: { data: string; projectName?: string }) {
-  const [viewMode, setViewMode] = useState<ViewMode>('cards');
+  const [viewMode, setViewMode] = useState<ViewMode>('table');
   const parsed = tryParseSitemapJSON(data);
 
   // Group sections by section name
@@ -323,13 +323,13 @@ export function SitemapTable({ data, projectName }: { data: string; projectName?
                 <th className="w-[120px] bg-white text-[11px] font-semibold text-[#6e6e73] uppercase tracking-[0.6px] py-2.5 px-3.5 text-left border-b border-[#d2d2d7] sticky top-0 z-10">
                   Sub-Section
                 </th>
-                <th className="w-[180px] bg-white text-[11px] font-semibold text-[#6e6e73] uppercase tracking-[0.6px] py-2.5 px-3.5 text-left border-b border-[#d2d2d7] sticky top-0 z-10">
+                <th className="bg-white text-[11px] font-semibold text-[#6e6e73] uppercase tracking-[0.6px] py-2.5 px-3.5 text-left border-b border-[#d2d2d7] sticky top-0 z-10">
                   Page Title
                 </th>
                 <th className="w-[160px] bg-white text-[11px] font-semibold text-[#6e6e73] uppercase tracking-[0.6px] py-2.5 px-3.5 text-left border-b border-[#d2d2d7] sticky top-0 z-10">
                   Path
                 </th>
-                <th className="bg-white text-[11px] font-semibold text-[#6e6e73] uppercase tracking-[0.6px] py-2.5 px-3.5 text-left border-b border-[#d2d2d7] sticky top-0 z-10">
+                <th className="w-[200px] bg-white text-[11px] font-semibold text-[#6e6e73] uppercase tracking-[0.6px] py-2.5 px-3.5 text-left border-b border-[#d2d2d7] sticky top-0 z-10">
                   Keywords
                 </th>
                 <th className="w-[80px] bg-white text-[11px] font-semibold text-[#6e6e73] uppercase tracking-[0.6px] py-2.5 px-3.5 text-left border-b border-[#d2d2d7] sticky top-0 z-10">

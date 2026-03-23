@@ -228,6 +228,15 @@ export default function App() {
 
   const handleGenerate = async (e: React.FormEvent) => {
     e.preventDefault();
+
+    // If project already has keyword results, ask user what to do
+    if (projectId && hasKeywords && !showRegenDialog) {
+      pendingGenerateRef.current = e;
+      setShowRegenDialog(true);
+      return;
+    }
+
+    setShowRegenDialog(false);
     setGenerating('keywords');
     setStreamText('');
     setActiveTools([]);
@@ -424,6 +433,8 @@ export default function App() {
   };
 
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
+  const [showRegenDialog, setShowRegenDialog] = useState(false);
+  const pendingGenerateRef = useRef<React.FormEvent | null>(null);
 
   const handleDeleteProject = async (id: string) => {
     try {
@@ -434,6 +445,39 @@ export default function App() {
     } catch (err) {
       console.error('Failed to delete project:', err);
     }
+  };
+
+  // Regen dialog: overwrite existing project
+  const handleRegenOverwrite = () => {
+    setKeywordResult('');
+    setSitemapResult('');
+    setShowRegenDialog(false);
+    // Trigger generate directly (bypass the hasKeywords check)
+    const fakeEvent = { preventDefault: () => {} } as React.FormEvent;
+    handleGenerate(fakeEvent);
+  };
+
+  // Regen dialog: create new version with numbered name
+  const handleRegenNewVersion = async () => {
+    const baseName = formData.businessName || 'Project';
+    // Find existing projects with same base name to determine version number
+    const existingVersions = projects.filter((p) => {
+      const name = p.business_name;
+      return name === baseName || name.match(new RegExp(`^${baseName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} \\d+$`));
+    });
+    const nextVersion = existingVersions.length + 1;
+    const newName = `${baseName} ${nextVersion}`;
+
+    setFormData((prev: Record<string, any>) => ({ ...prev, businessName: newName }));
+    setProjectId(null); // Force new project creation
+    setKeywordResult('');
+    setSitemapResult('');
+    setShowRegenDialog(false);
+    // Use setTimeout to let state update before triggering generate
+    setTimeout(() => {
+      const fakeEvent = { preventDefault: () => {} } as React.FormEvent;
+      handleGenerate(fakeEvent);
+    }, 0);
   };
 
   const projectName = formData.businessName || undefined;
@@ -568,10 +612,44 @@ export default function App() {
         </div>
       )}
 
+      {/* Regenerate Confirmation Dialog */}
+      {showRegenDialog && (
+        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/30 backdrop-blur-sm">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm mx-4 animate-fadeIn">
+            <div className="px-6 pt-5 pb-3">
+              <h2 className="text-[16px] font-semibold text-[#1d1d1f] mb-1">Re-generate project?</h2>
+              <p className="text-[13px] text-[#6e6e73] leading-relaxed">
+                <strong className="text-[#1d1d1f]">{formData.businessName}</strong> already has results. What would you like to do?
+              </p>
+            </div>
+            <div className="px-6 pb-5 flex flex-col gap-2">
+              <button
+                onClick={handleRegenOverwrite}
+                className="w-full px-4 py-2.5 rounded-xl text-[13px] font-medium text-white bg-[#ff9500] hover:bg-[#e68600] transition-colors cursor-pointer border-none"
+              >
+                Overwrite existing
+              </button>
+              <button
+                onClick={handleRegenNewVersion}
+                className="w-full px-4 py-2.5 rounded-xl text-[13px] font-medium text-white bg-[#0071e3] hover:bg-[#0062c4] transition-colors cursor-pointer border-none"
+              >
+                Create new version
+              </button>
+              <button
+                onClick={() => setShowRegenDialog(false)}
+                className="w-full px-4 py-2.5 rounded-xl text-[13px] font-medium text-[#6e6e73] bg-[#f5f5f7] hover:bg-[#e8e8ed] transition-colors cursor-pointer border-none"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <div className="flex flex-1 overflow-hidden">
         <Sidebar steps={sidebarSteps} onStepClick={handleStepClick} />
 
-        <main className="flex-1 overflow-hidden flex flex-col">
+        <main className="flex-1 overflow-hidden flex flex-col bg-white">
           {/* ── Back to Running Banner ── */}
           {generating && viewingOtherProject && (
             <div className="px-7 pt-4 shrink-0">
