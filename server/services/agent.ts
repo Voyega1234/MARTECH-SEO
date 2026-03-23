@@ -22,6 +22,8 @@ function getOutputModel(): string {
   return process.env.CLAUDE_MODEL || 'claude-sonnet-4-6';
 }
 
+const CLAUDE_MAX_ATTEMPTS = 3;
+
 // --- Custom error class with user-friendly messages ---
 export class AgentError extends Error {
   code: string;
@@ -226,7 +228,7 @@ function elapsed(startMs: number): string {
 async function callClaudeWithRetry<T>(
   fn: () => Promise<T>,
   label: string,
-  maxRetries = 2
+  maxRetries = CLAUDE_MAX_ATTEMPTS
 ): Promise<T> {
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
@@ -358,21 +360,27 @@ export async function generateOnly(
   console.log(`\n[Agent-GenerateOnly] Starting with ${outputModel}`);
 
   let fullText = '';
-  const stream = client.messages.stream({
-    model: outputModel,
-    max_tokens: 64000,
-    system: systemPrompt + '\n\nCRITICAL: Your response must be ONLY a raw JSON object. Start with { and end with }. No markdown, no code fences, no text before or after. Output pure JSON only.',
-    messages: [
-      {
-        role: 'user',
-        content: `${userMessage}\n\nRemember: Output ONLY the JSON object. No text, no markdown, no explanation. Start with { and end with }.`,
-      },
-    ],
-  });
+  const response = await callClaudeWithRetry(
+    async () => {
+      fullText = '';
+      const stream = client.messages.stream({
+        model: outputModel,
+        max_tokens: 64000,
+        system: systemPrompt + '\n\nCRITICAL: Your response must be ONLY a raw JSON object. Start with { and end with }. No markdown, no code fences, no text before or after. Output pure JSON only.',
+        messages: [
+          {
+            role: 'user',
+            content: `${userMessage}\n\nRemember: Output ONLY the JSON object. No text, no markdown, no explanation. Start with { and end with }.`,
+          },
+        ],
+      });
 
-  const response = await stream.on('text', (text) => {
-    fullText += text;
-  }).finalMessage();
+      return stream.on('text', (text) => {
+        fullText += text;
+      }).finalMessage();
+    },
+    'Agent-GenerateOnly'
+  );
 
   const generateMs = Date.now() - totalStart;
   console.log(`[Agent-GenerateOnly] Done: ${(generateMs / 1000).toFixed(1)}s | Tokens: ${JSON.stringify(response.usage)}`);

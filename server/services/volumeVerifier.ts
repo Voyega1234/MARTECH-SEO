@@ -1,9 +1,11 @@
 // Post-generation volume verification:
-// Collects all keywords with "-" volume, makes ONE DFS API call to check,
-// patches back any real volumes found, keeps "-" for confirmed 0/null.
+// Resolves EVERY keyword volume from DFS after the agent returns its JSON.
+// This prevents LLM-authored numbers from reaching the UI.
 
-const DFS_API_URL = 'https://api.dataforseo.com/v3/dataforseo_labs/google/keyword_overview/live';
+const DFS_API_URL = 'https://api.dataforseo.com/v3/keywords_data/google_ads/search_volume/live';
 const MAX_KEYWORDS_PER_CALL = 1000; // DFS limit
+const DFS_LOCATION_CODE_THAILAND = 2764;
+const DFS_LANGUAGE_CODE_THAI = 'th';
 
 interface KeywordEntry {
   keyword: string;
@@ -32,6 +34,57 @@ interface KeywordData {
   product_lines: ProductLine[];
 }
 
+interface LookupVolumesResult {
+  volumeMap: Map<string, number>;
+  hadSuccessfulLookup: boolean;
+}
+
+function extractKeywordJson(text: string): KeywordData | null {
+  try {
+    const parsed = JSON.parse(text);
+    if (parsed?.product_lines && Array.isArray(parsed.product_lines)) {
+      return parsed;
+    }
+  } catch {
+    // Fall through to tolerant extraction
+  }
+
+  const lines = text.split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const trimmed = lines[i].trim();
+    if (trimmed === '```json' || trimmed === '```') continue;
+    if (!trimmed.startsWith('{')) continue;
+
+    const candidate = lines.slice(i).join('\n');
+    let depth = 0;
+    let end = -1;
+
+    for (let j = 0; j < candidate.length; j++) {
+      if (candidate[j] === '{') depth++;
+      else if (candidate[j] === '}') {
+        depth--;
+        if (depth === 0) {
+          end = j;
+          break;
+        }
+      }
+    }
+
+    if (end < 0) continue;
+
+    try {
+      const parsed = JSON.parse(candidate.slice(0, end + 1));
+      if (parsed?.product_lines && Array.isArray(parsed.product_lines)) {
+        return parsed;
+      }
+    } catch {
+      // Try next candidate
+    }
+  }
+
+  return null;
+}
+
 function getDfsAuth(): string | null {
   const login = process.env.DFS_API_LOGIN;
   const password = process.env.DFS_API_PASSWORD;
@@ -39,14 +92,19 @@ function getDfsAuth(): string | null {
   return Buffer.from(`${login}:${password}`).toString('base64');
 }
 
-async function lookupVolumes(keywords: string[]): Promise<Map<string, number>> {
+function normalizeKeyword(keyword: string): string {
+  return keyword.trim().replace(/\s+/g, ' ').toLowerCase();
+}
+
+async function lookupVolumes(keywords: string[]): Promise<LookupVolumesResult> {
   const auth = getDfsAuth();
   if (!auth) {
     console.warn('[VolumeVerifier] DFS credentials not set, skipping verification');
-    return new Map();
+    return { volumeMap: new Map<string, number>(), hadSuccessfulLookup: false };
   }
 
   const volumeMap = new Map<string, number>();
+  let hadSuccessfulLookup = false;
 
   // Batch if needed (DFS allows up to 1000 keywords per call)
   const batches: string[][] = [];
@@ -64,9 +122,9 @@ async function lookupVolumes(keywords: string[]): Promise<Map<string, number>> {
         },
         body: JSON.stringify([{
           keywords: batch,
-          location_name: 'Thailand',
-          language_code: 'th',
-          include_clickstream_data: false,
+          location_code: DFS_LOCATION_CODE_THAILAND,
+          language_code: DFS_LANGUAGE_CODE_THAI,
+          sort_by: 'relevance',
         }]),
       });
 
@@ -77,27 +135,41 @@ async function lookupVolumes(keywords: string[]): Promise<Map<string, number>> {
 
       const data = await response.json();
 
-      // Extract volumes from DFS response
-      if (data.tasks && Array.isArray(data.tasks)) {
+      if (data.tasks_error > 0) {
+        console.error('[VolumeVerifier] DFS task error:', JSON.stringify(data.tasks?.[0] ?? data));
+        continue;
+      }
+
+      hadSuccessfulLookup = true;
+
+      const items: any[] = [];
+
+      if (Array.isArray(data.items)) {
+        items.push(...data.items);
+      }
+
+      if (Array.isArray(data.result)) {
+        for (const result of data.result) {
+          if (Array.isArray(result?.items)) items.push(...result.items);
+          else if (result?.keyword) items.push(result);
+        }
+      }
+
+      if (Array.isArray(data.tasks)) {
         for (const task of data.tasks) {
-          if (task.result && Array.isArray(task.result)) {
-            for (const item of task.result) {
-              // Handle both flat items and items with nested structure
-              if (item.items && Array.isArray(item.items)) {
-                for (const kw of item.items) {
-                  const vol = kw.keyword_info?.search_volume ?? kw.search_volume;
-                  if (vol && vol > 0) {
-                    volumeMap.set(kw.keyword, vol);
-                  }
-                }
-              } else if (item.keyword) {
-                const vol = item.keyword_info?.search_volume ?? item.search_volume;
-                if (vol && vol > 0) {
-                  volumeMap.set(item.keyword, vol);
-                }
-              }
-            }
+          if (!Array.isArray(task?.result)) continue;
+          for (const result of task.result) {
+            if (Array.isArray(result?.items)) items.push(...result.items);
+            else if (result?.keyword) items.push(result);
           }
+        }
+      }
+
+      for (const item of items) {
+        const keyword = typeof item?.keyword === 'string' ? item.keyword : null;
+        const vol = item?.keyword_info?.search_volume ?? item?.search_volume;
+        if (keyword && typeof vol === 'number' && vol > 0) {
+          volumeMap.set(normalizeKeyword(keyword), vol);
         }
       }
     } catch (err) {
@@ -105,14 +177,12 @@ async function lookupVolumes(keywords: string[]): Promise<Map<string, number>> {
     }
   }
 
-  return volumeMap;
+  return { volumeMap, hadSuccessfulLookup };
 }
 
 export async function verifyDashVolumes(jsonStr: string): Promise<string> {
-  let data: KeywordData;
-  try {
-    data = JSON.parse(jsonStr);
-  } catch {
+  const data = extractKeywordJson(jsonStr);
+  if (!data) {
     console.warn('[VolumeVerifier] Could not parse keyword JSON, skipping verification');
     return jsonStr;
   }
@@ -121,56 +191,55 @@ export async function verifyDashVolumes(jsonStr: string): Promise<string> {
     return jsonStr;
   }
 
-  // Step 1: Collect all keywords with "-" volume
-  const dashKeywords: string[] = [];
+  // Step 1: Collect all keywords so DFS becomes the source of truth for every volume.
+  const allKeywords: string[] = [];
   for (const pl of data.product_lines) {
     for (const tp of pl.topic_pillars || []) {
       for (const kg of tp.keyword_groups || []) {
         for (const kw of kg.keywords || []) {
-          if (kw.volume === '-' || kw.volume === '–' || kw.volume === '—') {
-            dashKeywords.push(kw.keyword);
-          }
+          if (typeof kw.keyword === 'string' && kw.keyword.trim()) allKeywords.push(kw.keyword);
         }
       }
     }
   }
 
-  if (dashKeywords.length === 0) {
-    console.log('[VolumeVerifier] No "-" volumes found, skipping verification');
+  if (allKeywords.length === 0) {
+    console.log('[VolumeVerifier] No keywords found, skipping verification');
     return jsonStr;
   }
 
-  console.log(`[VolumeVerifier] Found ${dashKeywords.length} keywords with "-" volume, verifying with DFS...`);
+  const uniqueKeywords = [...new Set(allKeywords.map((kw) => kw.trim()).filter(Boolean))];
+
+  console.log(`[VolumeVerifier] Resolving ${uniqueKeywords.length} unique keyword volumes from DFS...`);
 
   // Step 2: Call DFS API
-  const volumeMap = await lookupVolumes(dashKeywords);
-
-  if (volumeMap.size === 0) {
-    console.log('[VolumeVerifier] No real volumes found — all confirmed as "-"');
+  const { volumeMap, hadSuccessfulLookup } = await lookupVolumes(uniqueKeywords);
+  if (!hadSuccessfulLookup) {
+    console.warn('[VolumeVerifier] DFS lookup did not complete successfully, keeping original volumes');
     return jsonStr;
   }
+  console.log(`[VolumeVerifier] DFS returned ${volumeMap.size} keywords with search volume data`);
 
-  console.log(`[VolumeVerifier] Found ${volumeMap.size} keywords with real volumes, patching...`);
-
-  // Step 3: Patch back real volumes
-  let patched = 0;
+  // Step 3: Overwrite all volumes using DFS data only.
+  let updated = 0;
+  let missing = 0;
   for (const pl of data.product_lines) {
     for (const tp of pl.topic_pillars || []) {
       for (const kg of tp.keyword_groups || []) {
         for (const kw of kg.keywords || []) {
-          if (kw.volume === '-' || kw.volume === '–' || kw.volume === '—') {
-            const realVolume = volumeMap.get(kw.keyword);
-            if (realVolume && realVolume > 0) {
-              kw.volume = realVolume;
-              patched++;
-            }
-          }
+          const realVolume = volumeMap.get(normalizeKeyword(kw.keyword));
+          const nextVolume: number | string =
+            typeof realVolume === 'number' && realVolume > 0 ? realVolume : '-';
+
+          if (String(kw.volume) !== String(nextVolume)) updated++;
+          if (nextVolume === '-') missing++;
+          kw.volume = nextVolume;
         }
       }
     }
   }
 
-  console.log(`[VolumeVerifier] Patched ${patched} keyword volumes`);
+  console.log(`[VolumeVerifier] Updated ${updated} keyword volumes; ${missing} keywords remain "-"`);
 
   return JSON.stringify(data);
 }

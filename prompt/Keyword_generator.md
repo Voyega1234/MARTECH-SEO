@@ -80,7 +80,7 @@ Output JSON Schema:
               "keywords": [
                 {
                   "keyword": "string",
-                  "volume": 0
+                  "volume": "number or '-'"
                 }
               ]
             }
