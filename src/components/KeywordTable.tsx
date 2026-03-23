@@ -102,7 +102,7 @@ function downloadCsv(filename: string, csvContent: string) {
 
 type FilterType = 'all' | 'high-conv' | 'high-traffic';
 
-export function KeywordTable({ data }: { data: string }) {
+export function KeywordTable({ data, projectName }: { data: string; projectName?: string }) {
   const [search, setSearch] = useState('');
   const [filter, setFilter] = useState<FilterType>('all');
 
@@ -171,7 +171,8 @@ export function KeywordTable({ data }: { data: string }) {
         );
       }
     }
-    downloadCsv('keyword-map.csv', [header.join(','), ...csvRows].join('\n'));
+    const slug = (projectName || 'keyword-map').replace(/\s+/g, '-').toLowerCase();
+    downloadCsv(`${slug}-keywords.csv`, [header.join(','), ...csvRows].join('\n'));
   };
 
   if (!parsed) {

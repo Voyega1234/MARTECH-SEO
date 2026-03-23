@@ -148,7 +148,7 @@ function potentialBadge(level: string) {
 
 type ViewMode = 'cards' | 'table';
 
-export function SitemapTable({ data }: { data: string }) {
+export function SitemapTable({ data, projectName }: { data: string; projectName?: string }) {
   const [viewMode, setViewMode] = useState<ViewMode>('cards');
   const parsed = tryParseSitemapJSON(data);
 
@@ -200,7 +200,8 @@ export function SitemapTable({ data }: { data: string }) {
         ].join(','));
       }
     }
-    downloadCsv('sitemap-plan.csv', [header.join(','), ...csvRows].join('\n'));
+    const slug = (projectName || 'sitemap-plan').replace(/\s+/g, '-').toLowerCase();
+    downloadCsv(`${slug}-sitemap.csv`, [header.join(','), ...csvRows].join('\n'));
   };
 
   return (

@@ -96,12 +96,11 @@ export async function saveSitemapResult(projectId: string, sitemapResult: string
   if (error) throw new Error(`Failed to save sitemap: ${error.message}`);
 }
 
-// List projects that have keyword results (most recent first)
+// List all projects (most recent first)
 export async function listProjects(): Promise<SeoProject[]> {
   const { data, error } = await supabase
     .from('seo_projects')
     .select('*')
-    .not('keyword_result', 'is', null)
     .order('created_at', { ascending: false });
 
   if (error) throw new Error(`Failed to list projects: ${error.message}`);

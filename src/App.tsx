@@ -128,12 +128,24 @@ export default function App() {
   const [elapsed, setElapsed] = useState(0);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const logEndRef = useRef<HTMLDivElement>(null);
+  // Track the running project so user can browse other projects and come back
+  const [runningProjectId, setRunningProjectId] = useState<string | null>(null);
+  const [viewingOtherProject, setViewingOtherProject] = useState(false);
+  // Save running project's form data so we can restore when going back
+  const runningFormDataRef = useRef<Record<string, any> | null>(null);
+  // Track when each step completed (elapsed seconds at completion)
+  const stepTimesRef = useRef<Record<string, number>>({});
+  const elapsedRef = useRef(0);
 
   // Elapsed timer
   useEffect(() => {
     if (generating) {
       setElapsed(0);
-      timerRef.current = setInterval(() => setElapsed((s) => s + 1), 1000);
+      elapsedRef.current = 0;
+      timerRef.current = setInterval(() => {
+        elapsedRef.current += 1;
+        setElapsed(elapsedRef.current);
+      }, 1000);
     } else {
       if (timerRef.current) clearInterval(timerRef.current);
     }
@@ -206,7 +218,7 @@ export default function App() {
   );
 
   const handleStepClick = (stepId: string) => {
-    if (generating) return;
+    if (generating && !viewingOtherProject) return; // Block clicks only when viewing running project
     if (stepId === 'keywords' && !hasKeywords) return;
     if (stepId === 'sitemap' && !hasSitemap) return;
     setActivePanel(stepId as ActivePanel);
@@ -220,9 +232,13 @@ export default function App() {
     setStreamText('');
     setActiveTools([]);
     setError('');
+    setViewingOtherProject(false);
+    stepTimesRef.current = {};
+    runningFormDataRef.current = { ...formData };
 
     try {
       log('> Connected to AI agent\n');
+      stepTimesRef.current.connected = elapsedRef.current;
 
       // Create project in Supabase if not already saved
       let currentProjectId = projectId;
@@ -231,6 +247,7 @@ export default function App() {
           const project = await createProject(formData);
           currentProjectId = project.id;
           setProjectId(project.id);
+          setRunningProjectId(project.id);
           log('> Project saved to database\n');
         } catch (err) {
           console.error('Failed to save project:', err);
@@ -281,6 +298,7 @@ export default function App() {
       }
 
       // ── Step 2: Generate Sitemap ──
+      stepTimesRef.current.keywords = elapsedRef.current;
       setGenerating('sitemap');
       log('\n> Starting sitemap generation...\n');
 
@@ -313,6 +331,7 @@ export default function App() {
       }
 
       setSitemapResult(sitemapJSON);
+      stepTimesRef.current.sitemap = elapsedRef.current;
 
       // Save sitemap to Supabase
       if (currentProjectId) {
@@ -333,14 +352,21 @@ export default function App() {
 
       log('\n> All done! Redirecting to results...\n');
       setGenerating(null);
+      setRunningProjectId(null);
+      setViewingOtherProject(false);
+      runningFormDataRef.current = null;
       setActivePanel('keywords');
     } catch (err) {
       setError((err as Error).message);
       setGenerating(null);
+      setRunningProjectId(null);
+      setViewingOtherProject(false);
+      runningFormDataRef.current = null;
     }
   };
 
   const handleStartOver = () => {
+    if (generating) return; // Don't reset while generating
     setFormData({ ...initialFormData });
     setActivePanel('business');
     setGenerating(null);
@@ -351,9 +377,18 @@ export default function App() {
     setError('');
     setProjectId(null);
     setShowProjectList(false);
+    setRunningProjectId(null);
+    setViewingOtherProject(false);
   };
 
   const handleLoadProject = async (project: SeoProject) => {
+    // If generation is running and user picks a different project, just view it
+    if (generating && project.id !== runningProjectId) {
+      setViewingOtherProject(true);
+    } else {
+      setViewingOtherProject(false);
+    }
+
     setFormData({
       businessName: project.business_name,
       websiteUrl: project.website_url || '',
@@ -377,10 +412,24 @@ export default function App() {
     }
   };
 
+  // Go back to the running project
+  const handleBackToRunning = () => {
+    if (!runningProjectId) return;
+    setViewingOtherProject(false);
+    setProjectId(runningProjectId);
+    // Restore the running project's form data (header reads businessName from formData)
+    if (runningFormDataRef.current) {
+      setFormData({ ...runningFormDataRef.current });
+    }
+  };
+
+  const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
+
   const handleDeleteProject = async (id: string) => {
     try {
       await deleteProject(id);
       setProjects((prev) => prev.filter((p) => p.id !== id));
+      setDeleteConfirmId(null);
       if (projectId === id) handleStartOver();
     } catch (err) {
       console.error('Failed to delete project:', err);
@@ -398,7 +447,7 @@ export default function App() {
           setShowProjectList(true);
         }}
         onNewProject={hasKeywords ? handleStartOver : undefined}
-        onExportCsv={hasKeywords ? () => {} : undefined}
+        onExportCsv={undefined}
         showActions={hasKeywords}
       />
 
@@ -483,17 +532,34 @@ export default function App() {
                         </span>
                       </div>
                     </div>
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        handleDeleteProject(project.id);
-                      }}
-                      className="w-7 h-7 rounded-lg flex items-center justify-center text-[#aeaeb2] hover:text-[#ff3b30] hover:bg-[#fff5f5] transition-colors cursor-pointer border-none bg-transparent shrink-0"
-                    >
-                      <svg viewBox="0 0 16 16" fill="currentColor" className="w-3.5 h-3.5">
-                        <path d="M11 1.75V3h2.25a.75.75 0 0 1 0 1.5H2.75a.75.75 0 0 1 0-1.5H5V1.75C5 .784 5.784 0 6.75 0h2.5C10.216 0 11 .784 11 1.75zM6.5 1.75V3h3V1.75a.25.25 0 0 0-.25-.25h-2.5a.25.25 0 0 0-.25.25zM3.613 5.5l.806 8.87A1.75 1.75 0 0 0 6.163 16h3.674a1.75 1.75 0 0 0 1.744-1.63l.806-8.87H3.613z" />
-                      </svg>
-                    </button>
+                    {deleteConfirmId === project.id ? (
+                      <div className="flex items-center gap-1.5 shrink-0" onClick={(e) => e.stopPropagation()}>
+                        <button
+                          onClick={() => handleDeleteProject(project.id)}
+                          className="px-2 py-1 rounded-md text-[11px] font-medium text-white bg-[#ff3b30] hover:bg-[#d63028] transition-colors cursor-pointer border-none"
+                        >
+                          Delete
+                        </button>
+                        <button
+                          onClick={() => setDeleteConfirmId(null)}
+                          className="px-2 py-1 rounded-md text-[11px] font-medium text-[#6e6e73] bg-[#f5f5f7] hover:bg-[#e8e8ed] transition-colors cursor-pointer border-none"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    ) : (
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setDeleteConfirmId(project.id);
+                        }}
+                        className="w-7 h-7 rounded-lg flex items-center justify-center text-[#aeaeb2] hover:text-[#ff3b30] hover:bg-[#fff5f5] transition-colors cursor-pointer border-none bg-transparent shrink-0"
+                      >
+                        <svg viewBox="0 0 16 16" fill="currentColor" className="w-3.5 h-3.5">
+                          <path d="M11 1.75V3h2.25a.75.75 0 0 1 0 1.5H2.75a.75.75 0 0 1 0-1.5H5V1.75C5 .784 5.784 0 6.75 0h2.5C10.216 0 11 .784 11 1.75zM6.5 1.75V3h3V1.75a.25.25 0 0 0-.25-.25h-2.5a.25.25 0 0 0-.25.25zM3.613 5.5l.806 8.87A1.75 1.75 0 0 0 6.163 16h3.674a1.75 1.75 0 0 0 1.744-1.63l.806-8.87H3.613z" />
+                        </svg>
+                      </button>
+                    )}
                   </div>
                 );
               })}
@@ -506,123 +572,160 @@ export default function App() {
         <Sidebar steps={sidebarSteps} onStepClick={handleStepClick} />
 
         <main className="flex-1 overflow-hidden flex flex-col">
-          {/* ── Generating Overlay ── */}
-          {generating && (
-            <div className="flex flex-col h-full animate-fadeIn">
-              {/* Header area */}
-              <div className="px-7 pt-6 pb-4 shrink-0">
-                <div className="flex items-center gap-4 mb-4">
-                  {/* Animated spinner */}
-                  <div className="relative w-11 h-11 shrink-0">
-                    <div className="absolute inset-0 rounded-full border-[3px] border-[#e8e8ed]" />
-                    <div className="absolute inset-0 rounded-full border-[3px] border-transparent border-t-[#0071e3] animate-spin" />
-                    <div className="absolute inset-0 flex items-center justify-center">
-                      <svg viewBox="0 0 16 16" fill="#0071e3" className="w-4 h-4">
-                        <path d="M8.75 1.75a.75.75 0 0 0-1.5 0v5.69L5.03 5.22a.75.75 0 0 0-1.06 1.06l3.5 3.5a.75.75 0 0 0 1.06 0l3.5-3.5a.75.75 0 0 0-1.06-1.06L8.75 7.44V1.75z" />
-                        <path d="M1.75 12.5a.75.75 0 0 0 0 1.5h12.5a.75.75 0 0 0 0-1.5H1.75z" />
-                      </svg>
-                    </div>
-                  </div>
-                  <div>
-                    <div className="text-[22px] font-semibold text-[#1d1d1f] tracking-[-0.5px]">
-                      {generating === 'keywords' ? 'Generating Keyword Map' : 'Generating Keyword Sitemap'}
-                    </div>
-                    <div className="text-[13px] text-[#6e6e73] mt-0.5 flex items-center gap-2">
-                      <span>AI is researching and building your SEO plan</span>
-                      <span className="text-[#aeaeb2]">·</span>
-                      <span className="font-mono text-[12px] text-[#aeaeb2] tabular-nums">
-                        {Math.floor(elapsed / 60)}:{String(elapsed % 60).padStart(2, '0')}
-                      </span>
-                    </div>
-                  </div>
+          {/* ── Back to Running Banner ── */}
+          {generating && viewingOtherProject && (
+            <div className="px-7 pt-4 shrink-0">
+              <button
+                onClick={handleBackToRunning}
+                className="w-full flex items-center gap-3 px-4 py-3 rounded-xl bg-[#e8f1fb] border border-[#0071e3]/20 text-[#0071e3] hover:bg-[#dce8f8] transition-all cursor-pointer"
+              >
+                <div className="relative w-5 h-5 shrink-0">
+                  <div className="absolute inset-0 rounded-full border-2 border-[#0071e3]/30" />
+                  <div className="absolute inset-0 rounded-full border-2 border-transparent border-t-[#0071e3] animate-spin" />
                 </div>
-
-                {/* Progress steps */}
-                <div className="flex items-center gap-6 py-3 px-4 bg-white rounded-xl border border-[#e8e8ed]">
-                  {[
-                    { label: 'Connecting', done: elapsed >= 2 },
-                    { label: 'Keywords', done: generating === 'sitemap' || (generating === 'keywords' && elapsed >= 60) },
-                    { label: 'Sitemap', done: generating === 'sitemap' && elapsed >= 30 },
-                    { label: 'Done', done: false },
-                  ].map((step, i, arr) => {
-                    const isActive = !step.done && (i === 0 || arr[i - 1].done);
-                    return (
-                      <div key={i} className="flex items-center gap-2">
-                        {i > 0 && (
-                          <div className={`w-8 h-px ${arr[i - 1].done ? 'bg-[#34c759]' : 'bg-[#e8e8ed]'}`} />
-                        )}
-                        <div className={`w-5 h-5 rounded-full flex items-center justify-center text-[9px] font-bold shrink-0 ${
-                          step.done
-                            ? 'bg-[#34c759] text-white'
-                            : isActive
-                            ? 'bg-[#0071e3] text-white animate-pulse'
-                            : 'bg-[#f5f5f7] text-[#d2d2d7] border border-[#e8e8ed]'
-                        }`}>
-                          {step.done ? (
-                            <svg viewBox="0 0 16 16" fill="currentColor" className="w-2.5 h-2.5">
-                              <path d="M13.78 4.22a.75.75 0 0 1 0 1.06l-7.25 7.25a.75.75 0 0 1-1.06 0L2.22 9.28a.75.75 0 0 1 1.06-1.06L6 10.94l6.72-6.72a.75.75 0 0 1 1.06 0z" />
-                            </svg>
-                          ) : (
-                            i + 1
-                          )}
-                        </div>
-                        <span className={`text-[12px] font-medium whitespace-nowrap ${
-                          step.done ? 'text-[#34c759]' : isActive ? 'text-[#0071e3]' : 'text-[#d2d2d7]'
-                        }`}>
-                          {step.label}
-                        </span>
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-
-              {/* Tool badges */}
-              {activeTools.length > 0 && (
-                <div className="flex flex-wrap gap-2 px-7 pb-2">
-                  {activeTools.slice(-5).map((tool, i) => (
-                    <span
-                      key={i}
-                      className="inline-flex items-center gap-1.5 px-2.5 py-1 bg-[#e8f1fb] text-[#0071e3] rounded-full text-[11px] font-medium animate-fadeIn"
-                    >
-                      <svg viewBox="0 0 16 16" fill="currentColor" className="w-3 h-3">
-                        <path d="M11.93 8.5a4.002 4.002 0 0 1-7.86 0H.75a.75.75 0 0 1 0-1.5h3.32a4.002 4.002 0 0 1 7.86 0h3.32a.75.75 0 0 1 0 1.5h-3.32zM8 10.5a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5z" />
-                      </svg>
-                      {tool}
-                    </span>
-                  ))}
-                </div>
-              )}
-
-              {/* Agent status */}
-              <div className="flex-1 overflow-y-auto px-7 py-3">
-                <div className="bg-[#1d1d1f] rounded-xl p-5 min-h-[200px] max-h-full overflow-y-auto">
-                  <div className="flex items-center gap-2 mb-3">
-                    <svg viewBox="0 0 16 16" fill="currentColor" className="w-3.5 h-3.5 text-white/20">
-                      <path d="M0 1.75C0 .784.784 0 1.75 0h12.5C15.216 0 16 .784 16 1.75v12.5A1.75 1.75 0 0 1 14.25 16H1.75A1.75 1.75 0 0 1 0 14.25V1.75zm1.75-.25a.25.25 0 0 0-.25.25v12.5c0 .138.112.25.25.25h12.5a.25.25 0 0 0 .25-.25V1.75a.25.25 0 0 0-.25-.25H1.75zM3 3.75A.75.75 0 0 1 3.75 3h.5a.75.75 0 0 1 0 1.5h-.5A.75.75 0 0 1 3 3.75zM3.75 6a.75.75 0 0 0 0 1.5h8.5a.75.75 0 0 0 0-1.5h-8.5zm0 3.5a.75.75 0 0 0 0 1.5h5.5a.75.75 0 0 0 0-1.5h-5.5z"/>
-                    </svg>
-                    <span className="text-[11px] text-white/30 font-mono">execution logs</span>
-                  </div>
-                  <pre className="text-[12px] text-[#a1a1a6] whitespace-pre-wrap font-mono leading-relaxed">
-                    {streamText || (
-                      <span className="inline-flex items-center gap-2">
-                        <span className="inline-block w-1.5 h-3.5 bg-[#0071e3] animate-pulse rounded-sm" />
-                        <span className="text-white/40">Connecting to agent...</span>
-                      </span>
-                    )}
-                    {generating && (
-                      <span className="inline-flex items-center gap-1 mt-1">
-                        <span className="inline-block w-1.5 h-3.5 bg-[#0071e3] animate-pulse rounded-sm" />
-                      </span>
-                    )}
-                  </pre>
-                </div>
-              </div>
+                <span className="text-[13px] font-medium">
+                  {generating === 'keywords' ? '🔍' : '🗺️'}{' '}
+                  Generating for <strong>{runningFormDataRef.current?.businessName || 'project'}</strong> — click to go back
+                </span>
+                <span className="ml-auto text-[12px] font-mono text-[#0071e3]/60">
+                  {Math.floor(elapsed / 60)}:{String(elapsed % 60).padStart(2, '0')}
+                </span>
+              </button>
             </div>
           )}
 
+          {/* ── Generating Overlay ── */}
+          {generating && !viewingOtherProject && (() => {
+            const fmt = (s: number) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+
+            const steps = [
+              {
+                emoji: '🔗',
+                doneEmoji: '✅',
+                label: 'Connected to AI agent',
+                desc: 'Initializing project',
+                doneDesc: 'Project saved to database',
+                done: elapsed >= 2,
+                active: elapsed < 2,
+                doneTime: stepTimesRef.current.connected,
+              },
+              {
+                emoji: '🔍',
+                doneEmoji: '✅',
+                label: 'Researching keywords',
+                desc: 'Scanning search volumes with DataForSEO',
+                doneDesc: 'Keywords fetched successfully',
+                done: generating === 'sitemap',
+                active: generating === 'keywords' && elapsed >= 2,
+                doneTime: stepTimesRef.current.keywords,
+              },
+              {
+                emoji: '🗺️',
+                doneEmoji: '✅',
+                label: 'Building sitemap',
+                desc: 'Mapping clusters to URL structure',
+                doneDesc: 'Sitemap pages mapped successfully',
+                done: false,
+                active: generating === 'sitemap',
+                doneTime: stepTimesRef.current.sitemap,
+              },
+              {
+                emoji: '📄',
+                doneEmoji: '🎉',
+                label: 'Finalizing report',
+                desc: 'Almost there',
+                doneDesc: 'Keyword map ready to export',
+                done: false,
+                active: false,
+                doneTime: stepTimesRef.current.finalize,
+              },
+            ];
+
+            const heroEmoji = generating === 'sitemap' ? '🗺️' : '🔍';
+            const title = generating === 'keywords' ? 'Researching keywords...' : 'Building sitemap...';
+            const businessName = formData.businessName || 'your project';
+
+            return (
+              <div className="flex-1 flex items-center justify-center animate-fadeIn overflow-y-auto py-8">
+                <div className="w-full max-w-[440px] text-center px-4">
+                  {/* Hero emoji */}
+                  <span className="text-[56px] mb-5 block" style={{ animation: 'float 3s ease-in-out infinite' }}>
+                    {heroEmoji}
+                  </span>
+
+                  {/* Title */}
+                  <div className="text-[18px] font-medium text-[#1d1d1f] mb-1.5">{title}</div>
+                  <div className="text-[13px] text-[#6e6e73] mb-8 leading-relaxed">
+                    Hang tight — the AI is scanning search volumes<br />
+                    and building your SEO map for <strong className="text-[#1d1d1f]">{businessName}</strong>
+                  </div>
+
+                  {/* Steps */}
+                  <div className="flex flex-col gap-2 mb-6 text-left">
+                    {steps.map((step, i) => {
+                      const stepClass = step.done
+                        ? 'bg-[#f0faf4] border-[rgba(52,199,89,0.3)]'
+                        : step.active
+                        ? 'bg-[#f0f5ff] border-[rgba(0,122,255,0.3)]'
+                        : 'bg-[#efefef] border-[rgba(0,0,0,0.08)]';
+
+                      const labelClass = step.done
+                        ? 'text-[#248a3d]'
+                        : step.active
+                        ? 'text-[#0071e3]'
+                        : 'text-[#aeaeb2]';
+
+                      const descClass = step.done
+                        ? 'text-[#34c759]'
+                        : step.active
+                        ? 'text-[#007aff]'
+                        : 'text-[#aeaeb2]';
+
+                      const tailClass = step.done
+                        ? 'text-[#34c759]'
+                        : step.active
+                        ? 'text-[#007aff]'
+                        : 'text-[#aeaeb2]';
+
+                      // Time: done steps show their completion time, active shows live elapsed
+                      let tailText = '';
+                      if (step.done && step.doneTime !== undefined) {
+                        tailText = fmt(step.doneTime);
+                      } else if (step.active) {
+                        tailText = fmt(elapsed);
+                      }
+
+                      return (
+                        <div
+                          key={i}
+                          className={`flex items-center gap-3 px-3.5 py-2.5 rounded-xl border transition-all duration-300 ${stepClass}`}
+                        >
+                          <div className="text-[18px] w-7 text-center shrink-0 leading-none">
+                            {step.done ? step.doneEmoji : step.emoji}
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <div className={`text-[13px] font-medium ${labelClass}`}>{step.label}</div>
+                            <div className={`text-[11px] mt-0.5 ${descClass}`}>
+                              {step.done ? step.doneDesc : step.active ? (
+                                <>{step.desc}<span className="animate-pulse">...</span></>
+                              ) : step.desc}
+                            </div>
+                          </div>
+                          <div className={`text-[11px] shrink-0 tabular-nums ${tailClass}`}>
+                            {tailText}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                </div>
+              </div>
+            );
+          })()}
+
           {/* ── Panel 1: Business Context ── */}
-          {!generating && activePanel === 'business' && (
+          {(!generating || viewingOtherProject) && activePanel === 'business' && (
             <div className="flex flex-col h-full animate-fadeIn">
               <div className="px-7 pt-5 shrink-0">
                 <div className="flex items-start justify-between gap-4 mb-4">
@@ -810,7 +913,7 @@ export default function App() {
           )}
 
           {/* ── Panel 2: Keyword Groups ── */}
-          {!generating && activePanel === 'keywords' && hasKeywords && (
+          {(!generating || viewingOtherProject) && activePanel === 'keywords' && hasKeywords && (
             <div className="flex flex-col h-full animate-fadeIn">
               <div className="px-7 pt-5 shrink-0">
                 <div className="flex items-start justify-between gap-4 mb-4">
@@ -826,13 +929,13 @@ export default function App() {
               </div>
 
               <div className="flex-1 overflow-auto px-7 pb-7">
-                <KeywordTable data={keywordResult} />
+                <KeywordTable data={keywordResult} projectName={formData.businessName} />
               </div>
             </div>
           )}
 
           {/* ── Panel 3: Keyword Sitemap ── */}
-          {!generating && activePanel === 'sitemap' && hasSitemap && (
+          {(!generating || viewingOtherProject) && activePanel === 'sitemap' && hasSitemap && (
             <div className="flex flex-col h-full animate-fadeIn">
               <div className="px-7 pt-5 shrink-0">
                 <div className="flex items-start justify-between gap-4 mb-4">
@@ -848,13 +951,13 @@ export default function App() {
               </div>
 
               <div className="flex-1 overflow-auto px-7 pb-7">
-                <SitemapTable data={sitemapResult} />
+                <SitemapTable data={sitemapResult} projectName={formData.businessName} />
               </div>
             </div>
           )}
 
           {/* ── Empty state for locked panels ── */}
-          {!generating && activePanel === 'keywords' && !hasKeywords && (
+          {(!generating || viewingOtherProject) && activePanel === 'keywords' && !hasKeywords && (
             <div className="flex flex-col items-center justify-center h-full gap-3 px-6 py-16 text-center animate-fadeIn">
               <div className="w-12 h-12 rounded-[14px] bg-[#f5f5f7] border border-[#d2d2d7] flex items-center justify-center text-[#aeaeb2]">
                 <svg viewBox="0 0 16 16" fill="currentColor" className="w-5 h-5">
@@ -874,7 +977,7 @@ export default function App() {
             </div>
           )}
 
-          {!generating && activePanel === 'sitemap' && !hasSitemap && (
+          {(!generating || viewingOtherProject) && activePanel === 'sitemap' && !hasSitemap && (
             <div className="flex flex-col items-center justify-center h-full gap-3 px-6 py-16 text-center animate-fadeIn">
               <div className="w-12 h-12 rounded-[14px] bg-[#f5f5f7] border border-[#d2d2d7] flex items-center justify-center text-[#aeaeb2]">
                 <svg viewBox="0 0 16 16" fill="currentColor" className="w-5 h-5">
