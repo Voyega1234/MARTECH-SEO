@@ -125,6 +125,7 @@ export default function App() {
   const [projectId, setProjectId] = useState<string | null>(null);
   const [projects, setProjects] = useState<SeoProject[]>([]);
   const [showProjectList, setShowProjectList] = useState(false);
+  const [projectSearch, setProjectSearch] = useState('');
   const [elapsed, setElapsed] = useState(0);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const logEndRef = useRef<HTMLDivElement>(null);
@@ -166,6 +167,15 @@ export default function App() {
 
   const hasKeywords = keywordResult.length > 0;
   const hasSitemap = sitemapResult.length > 0;
+  const filteredProjects = useMemo(() => {
+    const query = projectSearch.trim().toLowerCase();
+    if (!query) return projects;
+    return projects.filter((project) => {
+      const name = (project.business_name || '').toLowerCase();
+      const website = (project.website_url || '').toLowerCase();
+      return name.includes(query) || website.includes(query);
+    });
+  }, [projectSearch, projects]);
 
   // Count keyword groups for badge
   const keywordGroupCount = useMemo(() => {
@@ -266,7 +276,7 @@ export default function App() {
       }
 
       // ── Step 1: Generate Keywords ──
-      log('> Starting keyword research with DataForSEO tools...\n');
+      log('> Starting keyword research with Google search data...\n');
 
       const MAX_ATTEMPTS = 3;
       let keywordJSON: string | null = null;
@@ -566,6 +576,7 @@ export default function App() {
       <Header
         projectName={projectName}
         onOpenProjects={() => {
+          setProjectSearch('');
           listProjects().then(setProjects).catch(console.error);
           setShowProjectList(true);
         }}
@@ -591,6 +602,23 @@ export default function App() {
             </div>
 
             <div className="flex-1 overflow-y-auto px-6 py-3">
+              <div className="mb-3 relative">
+                <input
+                  type="text"
+                  value={projectSearch}
+                  onChange={(e) => setProjectSearch(e.target.value)}
+                  placeholder="Search projects"
+                  className="w-full rounded-xl border border-[#d2d2d7] bg-[#f5f5f7] px-10 py-2.5 text-[13px] text-[#1d1d1f] outline-none transition-colors placeholder:text-[#8e8e93] focus:border-[#0071e3] focus:bg-white"
+                />
+                <svg
+                  viewBox="0 0 16 16"
+                  fill="currentColor"
+                  className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[#8e8e93]"
+                >
+                  <path d="M11.742 10.344l3.487 3.487a.99.99 0 1 1-1.4 1.4l-3.487-3.486a6 6 0 1 1 1.4-1.401zM6.5 11A4.5 4.5 0 1 0 6.5 2a4.5 4.5 0 0 0 0 9z" />
+                </svg>
+              </div>
+
               {/* New Project button */}
               <button
                 onClick={handleStartOver}
@@ -609,7 +637,13 @@ export default function App() {
                 </div>
               )}
 
-              {projects.map((project) => {
+              {projects.length > 0 && filteredProjects.length === 0 && (
+                <div className="text-center py-8 text-[13px] text-[#aeaeb2]">
+                  No projects found
+                </div>
+              )}
+
+              {filteredProjects.map((project) => {
                 const statusColor =
                   project.status === 'sitemap_generated'
                     ? 'bg-[#34c759]'
@@ -793,7 +827,7 @@ export default function App() {
                     emoji: '🔍',
                     doneEmoji: '✅',
                     label: 'Researching keywords',
-                    desc: 'Scanning search volumes with DataForSEO',
+                    desc: 'Scanning search volumes with Google data',
                     doneDesc: 'Keywords fetched successfully',
                     done: generating === 'sitemap',
                     active: generating === 'keywords' && elapsed >= 2,
