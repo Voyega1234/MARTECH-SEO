@@ -4,7 +4,7 @@ Async job API for the new keyword expansion step.
 
 ## Scope
 
-- Fixed market: `Thailand`
+- Default market: `Thailand`
 - Fixed language: `th`
 - Expands all `seed_keywords` via DataForSEO Labs keyword suggestions
 - Pulls ranked organic keywords for each competitor domain to full exhaustion
@@ -44,15 +44,21 @@ Request body:
 ```json
 {
   "seed_keywords": ["โซล่าเซลล์", "solar cell", "ออนกริด"],
-  "competitor_domains": ["example.com", "example.org"]
+  "competitor_domains": ["example.com", "example.org"],
+  "location_name": "Thailand",
+  "seed_limit_per_page": 500,
+  "competitor_limit_per_page": 200
 }
 ```
 
 Notes:
 
 - `competitor_domains` is optional
-- Seed expansion paginates to full exhaustion using `limit=500`, `offset=0,500,1000...`
-- Competitor expansion paginates to full exhaustion using `limit=200`, `offset=0,200,400...`
+- `location_name` is optional and defaults to `Thailand`
+- `seed_limit_per_page` is an advanced optional setting and defaults to `500`
+- `competitor_limit_per_page` is an advanced optional setting and defaults to `200`
+- Seed expansion paginates to full exhaustion using `offset += seed_limit_per_page`
+- Competitor expansion paginates to full exhaustion using `offset += competitor_limit_per_page`
 
 ### `GET /jobs/{job_id}`
 

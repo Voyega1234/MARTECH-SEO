@@ -22,8 +22,8 @@ load_dotenv()
 DFS_BASE_URL = "https://api.dataforseo.com/v3"
 DFS_LOCATION_NAME = "Thailand"
 DFS_LANGUAGE_CODE = "th"
-SEED_PAGE_SIZE = 500
-COMPETITOR_PAGE_SIZE = 200
+DEFAULT_SEED_PAGE_SIZE = 500
+DEFAULT_COMPETITOR_PAGE_SIZE = 200
 MAX_CONCURRENT_DFS_CALLS = 5
 MIN_SECONDS_BETWEEN_CALLS = 0.06
 MAX_RETRIES = 3
@@ -39,6 +39,9 @@ class JobStatus(str, Enum):
 class ExpandRequest(BaseModel):
     seed_keywords: list[str] = Field(min_length=1)
     competitor_domains: list[str] = Field(default_factory=list)
+    location_name: str = Field(default=DFS_LOCATION_NAME)
+    seed_limit_per_page: int = Field(default=DEFAULT_SEED_PAGE_SIZE, ge=1, le=1000)
+    competitor_limit_per_page: int = Field(default=DEFAULT_COMPETITOR_PAGE_SIZE, ge=1, le=1000)
 
     @field_validator("seed_keywords", mode="before")
     @classmethod
@@ -59,6 +62,12 @@ class ExpandRequest(BaseModel):
             raise ValueError("competitor_domains must be a list")
         domains = [normalize_domain(item) for item in value if clean_text(item)]
         return dedupe_preserve_order([domain for domain in domains if domain])
+
+    @field_validator("location_name", mode="before")
+    @classmethod
+    def clean_location_name(cls, value: Any) -> str:
+        cleaned = clean_text(value)
+        return cleaned or DFS_LOCATION_NAME
 
 
 class JobSummary(BaseModel):
@@ -376,6 +385,8 @@ def extract_competitor_rows(result: dict[str, Any]) -> list[dict[str, Any]]:
 
 async def expand_seed_keyword(
     client: DataForSEOClient,
+    location_name: str,
+    page_size: int,
     seed_keyword: str,
     progress: dict[str, Any],
 ) -> list[dict[str, Any]]:
@@ -390,9 +401,9 @@ async def expand_seed_keyword(
         payload = [
             {
                 "keyword": seed_keyword,
-                "location_name": DFS_LOCATION_NAME,
+                "location_name": location_name,
                 "language_code": DFS_LANGUAGE_CODE,
-                "limit": SEED_PAGE_SIZE,
+                "limit": page_size,
                 "offset": offset,
                 "order_by": ["keyword_info.search_volume,desc"],
             }
@@ -404,15 +415,17 @@ async def expand_seed_keyword(
         current_rows = extract_seed_rows(result)
         rows.extend(current_rows)
 
-        if len(current_rows) < SEED_PAGE_SIZE:
+        if len(current_rows) < page_size:
             break
-        offset += SEED_PAGE_SIZE
+        offset += page_size
 
     return rows
 
 
 async def fetch_competitor_keywords(
     client: DataForSEOClient,
+    location_name: str,
+    page_size: int,
     domain: str,
     progress: dict[str, Any],
 ) -> list[dict[str, Any]]:
@@ -421,30 +434,30 @@ async def fetch_competitor_keywords(
     page = 0
 
     while True:
-      page += 1
-      progress["current_item"] = f"Competitor: {domain} (page {page})"
-      payload = [
-          {
-              "target": domain,
-              "location_name": DFS_LOCATION_NAME,
-              "language_code": DFS_LANGUAGE_CODE,
-              "item_types": ["organic"],
-              "limit": COMPETITOR_PAGE_SIZE,
-              "offset": offset,
-              "order_by": ["keyword_data.keyword_info.search_volume,desc"],
-          }
-      ]
+        page += 1
+        progress["current_item"] = f"Competitor: {domain} (page {page})"
+        payload = [
+            {
+                "target": domain,
+                "location_name": location_name,
+                "language_code": DFS_LANGUAGE_CODE,
+                "item_types": ["organic"],
+                "limit": page_size,
+                "offset": offset,
+                "order_by": ["keyword_data.keyword_info.search_volume,desc"],
+            }
+        ]
 
-      data = await client.post_live("/dataforseo_labs/google/ranked_keywords/live", payload)
-      progress["total_api_calls"] += 1
-      result = extract_task_result(data)
-      current_rows = extract_competitor_rows(result)
-      rows.extend(current_rows)
+        data = await client.post_live("/dataforseo_labs/google/ranked_keywords/live", payload)
+        progress["total_api_calls"] += 1
+        result = extract_task_result(data)
+        current_rows = extract_competitor_rows(result)
+        rows.extend(current_rows)
 
-      if len(current_rows) < COMPETITOR_PAGE_SIZE:
-          break
+        if len(current_rows) < page_size:
+            break
 
-      offset += COMPETITOR_PAGE_SIZE
+        offset += page_size
 
     return rows
 
@@ -528,6 +541,9 @@ async def run_expand_job(job_id: str) -> None:
         }
 
     client = DataForSEOClient()
+    location_name = job.request.location_name
+    seed_page_size = job.request.seed_limit_per_page
+    competitor_page_size = job.request.competitor_limit_per_page
     seed_rows: list[dict[str, Any]] = []
     competitor_rows: list[dict[str, Any]] = []
 
@@ -535,6 +551,8 @@ async def run_expand_job(job_id: str) -> None:
         for seed_keyword in job.request.seed_keywords:
             current_rows = await expand_seed_keyword(
                 client=client,
+                location_name=location_name,
+                page_size=seed_page_size,
                 seed_keyword=seed_keyword,
                 progress=job.progress,
             )
@@ -545,7 +563,13 @@ async def run_expand_job(job_id: str) -> None:
         job.progress["message"] = "Collecting competitor ranking keywords"
 
         for domain in job.request.competitor_domains:
-            current_rows = await fetch_competitor_keywords(client=client, domain=domain, progress=job.progress)
+            current_rows = await fetch_competitor_keywords(
+                client=client,
+                location_name=location_name,
+                page_size=competitor_page_size,
+                domain=domain,
+                progress=job.progress,
+            )
             competitor_rows.extend(current_rows)
             job.progress["completed_competitor_domains"] += 1
 
