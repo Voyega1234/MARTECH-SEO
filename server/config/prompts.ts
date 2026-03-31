@@ -16,3 +16,7 @@ export function getKeywordGeneratorPrompt(): string {
 export function getSitemapPrompt(): string {
   return loadPrompt('Keyword_sitemap.md');
 }
+
+export function getSeedKeywordPrompt(): string {
+  return loadPrompt('SeedKeyword_generator.md');
+}

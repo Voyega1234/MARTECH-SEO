@@ -250,6 +250,7 @@ export async function runAgent(systemPrompt: string, userMessage: string): Promi
 export async function generateOnly(
   systemPrompt: string,
   userMessage: string,
+  options?: { responseMode?: 'json' | 'text' },
 ): Promise<AgentResult> {
   if (!process.env.ANTHROPIC_API_KEY) {
     throw new AgentError('ANTHROPIC_API_KEY not set', 'missing_api_key', 'Set ANTHROPIC_API_KEY environment variable.');
@@ -262,17 +263,24 @@ export async function generateOnly(
   const startTime = Date.now();
 
   let fullText = '';
+  const responseMode = options?.responseMode || 'json';
+  const systemSuffix = responseMode === 'json'
+    ? '\n\nCRITICAL: Your response must be ONLY a raw JSON object. Start with { and end with }. No markdown, no code fences, no text before or after. Output pure JSON only.'
+    : '\n\nCRITICAL: Return ONLY the final plain-text answer requested by the prompt. No markdown, no bullets, no explanation before or after.';
+  const userSuffix = responseMode === 'json'
+    ? '\n\nRemember: Output ONLY the JSON object. No text, no markdown, no explanation. Start with { and end with }.'
+    : '\n\nRemember: Output ONLY the final plain-text answer requested. No markdown or explanation.';
   const response = await callClaudeWithRetry(
     async () => {
       fullText = '';
       const stream = client.messages.stream({
         model: outputModel,
         max_tokens: 64000,
-        system: systemPrompt + '\n\nCRITICAL: Your response must be ONLY a raw JSON object. Start with { and end with }. No markdown, no code fences, no text before or after. Output pure JSON only.',
+        system: systemPrompt + systemSuffix,
         messages: [
           {
             role: 'user',
-            content: `${userMessage}\n\nRemember: Output ONLY the JSON object. No text, no markdown, no explanation. Start with { and end with }.`,
+            content: `${userMessage}${userSuffix}`,
           },
         ],
       });

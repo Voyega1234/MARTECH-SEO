@@ -1,7 +1,8 @@
 import { Router, Request, Response } from 'express';
-import { runAgent, streamAgent, AgentError } from '../services/agent.ts';
-import { getKeywordGeneratorPrompt } from '../config/prompts.ts';
+import { runAgent, streamAgent, AgentError, generateOnly } from '../services/agent.ts';
+import { getKeywordGeneratorPrompt, getSeedKeywordPrompt } from '../config/prompts.ts';
 import { verifyDashVolumes } from '../services/volumeVerifier.ts';
+import { parseAndValidateSeedOutput } from '../../shared/seedKeywords.ts';
 
 export const keywordRouter = Router();
 
@@ -21,6 +22,21 @@ function buildKeywordUserMessage(formData: Record<string, any>): string {
     parts.push(`Focus Product Lines:\n${formData.focusProductLines.map((p: string) => `- ${p}`).join('\n')}`);
   }
 
+  return parts.join('\n\n');
+}
+
+function buildSeedUserMessage(formData: Record<string, any>): string {
+  const parts: string[] = [];
+  parts.push(`Business Name: ${formData.businessName || 'N/A'}`);
+  parts.push(`Website URL: ${formData.websiteUrl || 'N/A'}`);
+  parts.push(`Business Description & Core Offerings: ${formData.businessDescription || 'N/A'}`);
+  parts.push(`SEO Goals & Conversion Action: ${formData.seoGoals || 'N/A'}`);
+  if (formData.mustRankKeywords?.length) {
+    parts.push(`Priority Keywords:\n${formData.mustRankKeywords.map((k: string) => `- ${k}`).join('\n')}`);
+  }
+  if (formData.focusProductLines?.length) {
+    parts.push(`Focus Product Lines:\n${formData.focusProductLines.map((p: string) => `- ${p}`).join('\n')}`);
+  }
   return parts.join('\n\n');
 }
 
@@ -67,6 +83,34 @@ keywordRouter.post('/generate', async (req: Request, res: Response) => {
     res.json(result);
   } catch (err) {
     console.error('Keyword generation error:', err);
+    const status = (err as any).code === 'auth_error' ? 401
+      : (err as any).code === 'rate_limit' ? 429
+      : 500;
+    res.status(status).json(errorResponse(err));
+  }
+});
+
+keywordRouter.post('/seeds', async (req: Request, res: Response) => {
+  try {
+    const { formData } = req.body;
+    const validationError = validateFormData(formData);
+    if (validationError) {
+      res.status(400).json({ error: validationError, code: 'validation' });
+      return;
+    }
+
+    const systemPrompt = getSeedKeywordPrompt();
+    const userMessage = buildSeedUserMessage(formData);
+    const result = await generateOnly(systemPrompt, userMessage, { responseMode: 'text' });
+    const seeds = parseAndValidateSeedOutput(result.result);
+
+    res.json({
+      success: true,
+      seeds,
+      raw: result.result,
+    });
+  } catch (err) {
+    console.error('Seed generation error:', err);
     const status = (err as any).code === 'auth_error' ? 401
       : (err as any).code === 'rate_limit' ? 429
       : 500;

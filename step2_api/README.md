@@ -8,6 +8,7 @@ Async job API for the new keyword expansion step.
 - Fixed language: `th`
 - Expands all `seed_keywords` via DataForSEO Labs keyword suggestions
 - Pulls ranked organic keywords for each competitor domain to full exhaustion
+- Pulls ranked organic keywords for each client website to full exhaustion
 - Deduplicates by keyword after removing spaces
 - Uses `keyword_info.search_volume` first
 - If `search_volume` is missing or `0`, falls back to the latest `monthly_searches` value
@@ -20,6 +21,8 @@ Set these environment variables before running:
 
 - `DFS_API_LOGIN`
 - `DFS_API_PASSWORD`
+- `SUPABASE_URL` or `VITE_SUPABASE_URL` (optional, for saving runs)
+- `SUPABASE_SERVICE_ROLE_KEY` (optional, for saving runs)
 
 ## Install
 
@@ -43,8 +46,10 @@ Request body:
 
 ```json
 {
+  "project_id": "seo-project-uuid",
   "seed_keywords": ["โซล่าเซลล์", "solar cell", "ออนกริด"],
   "competitor_domains": ["example.com", "example.org"],
+  "client_websites": ["aurabangkokclinic.com"],
   "location_name": "Thailand",
   "seed_limit_per_page": 500,
   "competitor_limit_per_page": 200,
@@ -54,7 +59,9 @@ Request body:
 
 Notes:
 
+- `project_id` is optional; when provided together with Supabase env vars, the API saves the run into the Step 2 tables
 - `competitor_domains` is optional
+- `client_websites` is optional
 - `location_name` is optional and defaults to `Thailand`
 - `seed_limit_per_page` is an advanced optional setting and defaults to `500`
 - `competitor_limit_per_page` is an advanced optional setting and defaults to `200`
@@ -83,13 +90,14 @@ JSON result shape:
   "summary": {},
   "source_catalog": {
     "s": ["โซล่าเซลล์", "solar cell"],
-    "c": ["lamptan.com"]
+    "c": ["lamptan.com"],
+    "w": ["aurabangkokclinic.com"]
   },
   "keywords": [
     {
       "keyword": "ติดตั้งโซล่าเซลล์",
       "search_volume": 2900,
-      "source_refs": ["s0", "c0"]
+      "source_refs": ["s0", "c0", "w0"]
     }
   ]
 }
@@ -99,7 +107,7 @@ CSV:
 
 ```csv
 keyword,search_volume,source_refs
-โซล่าเซลล์,40500,โซล่าเซลล์|lamptan.com
+โซล่าเซลล์,40500,โซล่าเซลล์|lamptan.com|aurabangkokclinic.com
 solar cell,9900,solar cell
 โซล่าเซลล์ facebook,-,โซล่าเซลล์
 ```
@@ -108,3 +116,4 @@ solar cell,9900,solar cell
 
 - This is an in-memory prototype. Jobs disappear if the server restarts.
 - Concurrency is capped inside the process to stay well below DataForSEO Labs limits.
+- Persistence to Supabase is optional and only runs when both `project_id` and Supabase env vars are present.

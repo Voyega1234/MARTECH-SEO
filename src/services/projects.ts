@@ -46,9 +46,13 @@ export async function saveKeywordResult(projectId: string, keywordResult: string
     const jsonMatch = keywordResult.match(/\{[\s\S]*\}/);
     if (jsonMatch) {
       parsed = JSON.parse(jsonMatch[0]);
-      for (const pl of parsed.product_lines || []) {
-        for (const tp of pl.topic_pillars || []) {
-          groupCount += (tp.keyword_groups || []).length;
+      if (Array.isArray(parsed.keywords)) {
+        groupCount = parsed.keywords.length;
+      } else {
+        for (const pl of parsed.product_lines || []) {
+          for (const tp of pl.topic_pillars || []) {
+            groupCount += (tp.keyword_groups || []).length;
+          }
         }
       }
     }

@@ -14,6 +14,7 @@ from typing import Any
 import httpx
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field, field_validator
 
@@ -37,8 +38,10 @@ class JobStatus(str, Enum):
 
 
 class ExpandRequest(BaseModel):
+    project_id: str | None = None
     seed_keywords: list[str] = Field(min_length=1)
     competitor_domains: list[str] = Field(default_factory=list)
+    client_websites: list[str] = Field(default_factory=list)
     location_name: str = Field(default=DFS_LOCATION_NAME)
     seed_limit_per_page: int = Field(default=DEFAULT_SEED_PAGE_SIZE, ge=1, le=1000)
     competitor_limit_per_page: int = Field(default=DEFAULT_COMPETITOR_PAGE_SIZE, ge=1, le=1000)
@@ -64,6 +67,16 @@ class ExpandRequest(BaseModel):
         domains = [normalize_domain(item) for item in value if clean_text(item)]
         return dedupe_preserve_order([domain for domain in domains if domain])
 
+    @field_validator("client_websites", mode="before")
+    @classmethod
+    def clean_client_websites(cls, value: Any) -> list[str]:
+        if value is None:
+            return []
+        if not isinstance(value, list):
+            raise ValueError("client_websites must be a list")
+        domains = [normalize_domain(item) for item in value if clean_text(item)]
+        return dedupe_preserve_order([domain for domain in domains if domain])
+
     @field_validator("location_name", mode="before")
     @classmethod
     def clean_location_name(cls, value: Any) -> str:
@@ -74,8 +87,10 @@ class ExpandRequest(BaseModel):
 class JobSummary(BaseModel):
     total_seed_keywords: int
     total_competitor_domains: int
+    total_client_websites: int
     total_seed_rows: int
     total_competitor_rows: int
+    total_client_website_rows: int
     deduped_keywords: int
     total_api_calls: int
 
@@ -83,12 +98,20 @@ class JobSummary(BaseModel):
 class KeywordResultRow(BaseModel):
     keyword: str
     search_volume: int | str
+    volume_source: str | None = None
+    latest_monthly_search_volume: int | None = None
+    cpc: float | None = None
+    competition: float | None = None
+    low_top_of_page_bid: float | None = None
+    high_top_of_page_bid: float | None = None
+    source_count: int = 0
     source_refs: list[str] = Field(default_factory=list)
 
 
 class SourceCatalog(BaseModel):
     s: list[str]
     c: list[str]
+    w: list[str]
 
 
 class JobResult(BaseModel):
@@ -108,6 +131,8 @@ class JobProgress(BaseModel):
     completed_seed_keywords: int = 0
     total_competitor_domains: int = 0
     completed_competitor_domains: int = 0
+    total_client_websites: int = 0
+    completed_client_websites: int = 0
     total_api_calls: int = 0
     current_item: str | None = None
     message: str | None = None
@@ -143,6 +168,8 @@ class StoredJob:
             "completed_seed_keywords": 0,
             "total_competitor_domains": 0,
             "completed_competitor_domains": 0,
+            "total_client_websites": 0,
+            "completed_client_websites": 0,
             "total_api_calls": 0,
             "current_item": None,
             "message": "Waiting to start",
@@ -204,6 +231,24 @@ def parse_int(value: Any) -> int | None:
     return None
 
 
+def parse_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return None
+        try:
+            return float(stripped)
+        except ValueError:
+            return None
+    return None
+
+
 def latest_monthly_search_volume(monthly_searches: Any) -> int | None:
     if not isinstance(monthly_searches, list):
         return None
@@ -227,19 +272,50 @@ def latest_monthly_search_volume(monthly_searches: Any) -> int | None:
     return latest_value
 
 
-def resolve_effective_volume(keyword_info: dict[str, Any] | None) -> int | None:
+def resolve_effective_volume_details(keyword_info: dict[str, Any] | None) -> dict[str, Any]:
     if not isinstance(keyword_info, dict):
-        return None
+        return {
+            "search_volume": None,
+            "latest_monthly_search_volume": None,
+            "volume_source": "missing",
+        }
 
     direct_volume = parse_int(keyword_info.get("search_volume"))
-    if direct_volume is not None and direct_volume > 0:
-        return direct_volume
-
     fallback_volume = latest_monthly_search_volume(keyword_info.get("monthly_searches"))
-    if fallback_volume is not None:
-        return fallback_volume
 
-    return direct_volume
+    if direct_volume is not None and direct_volume > 0:
+        return {
+            "search_volume": direct_volume,
+            "latest_monthly_search_volume": fallback_volume,
+            "volume_source": "search_volume",
+        }
+
+    if fallback_volume is not None:
+        return {
+            "search_volume": fallback_volume,
+            "latest_monthly_search_volume": fallback_volume,
+            "volume_source": "monthly_searches",
+        }
+
+    return {
+        "search_volume": direct_volume,
+        "latest_monthly_search_volume": None,
+        "volume_source": "missing",
+    }
+
+
+def extract_rank_fields(item: dict[str, Any]) -> tuple[int | None, int | None]:
+    ranked_serp_element = item.get("ranked_serp_element")
+    if not isinstance(ranked_serp_element, dict):
+        return None, None
+
+    serp_item = ranked_serp_element.get("serp_item")
+    serp_source = serp_item if isinstance(serp_item, dict) else ranked_serp_element
+
+    return (
+        parse_int(serp_source.get("rank_group")),
+        parse_int(serp_source.get("rank_absolute")),
+    )
 
 
 class ProcessRateLimiter:
@@ -316,6 +392,258 @@ class DataForSEOClient:
         raise RuntimeError(f"DataForSEO request failed after {MAX_RETRIES} attempts: {last_error}")
 
 
+class SupabasePersistence:
+    def __init__(self) -> None:
+        self._url = (
+            clean_text(os.getenv("SUPABASE_URL"))
+            or clean_text(os.getenv("VITE_SUPABASE_URL"))
+        ).rstrip("/")
+        self._service_role_key = clean_text(os.getenv("SUPABASE_SERVICE_ROLE_KEY"))
+        self._enabled = bool(self._url and self._service_role_key)
+        self._client: httpx.AsyncClient | None = None
+
+    @property
+    def enabled(self) -> bool:
+        return self._enabled
+
+    async def _get_client(self) -> httpx.AsyncClient:
+        if self._client is None:
+            if not self._enabled:
+                raise RuntimeError("Supabase persistence is not configured")
+            self._client = httpx.AsyncClient(
+                base_url=f"{self._url}/rest/v1",
+                timeout=httpx.Timeout(60.0, connect=30.0),
+                headers={
+                    "apikey": self._service_role_key,
+                    "Authorization": f"Bearer {self._service_role_key}",
+                    "Content-Type": "application/json",
+                },
+            )
+        return self._client
+
+    async def close(self) -> None:
+        if self._client is not None:
+            await self._client.aclose()
+            self._client = None
+
+    async def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        json: Any = None,
+        params: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> Any:
+        client = await self._get_client()
+        response = await client.request(method, path, json=json, params=params, headers=headers)
+        response.raise_for_status()
+        if not response.text:
+            return None
+        return response.json()
+
+    async def create_run(self, job_id: str, request: ExpandRequest) -> None:
+        if not self.enabled or not request.project_id:
+            return
+
+        payload = {
+            "id": job_id,
+            "project_id": request.project_id,
+            "location_name": request.location_name,
+            "language_code": DFS_LANGUAGE_CODE,
+            "seed_limit_per_page": request.seed_limit_per_page,
+            "competitor_limit_per_page": request.competitor_limit_per_page,
+            "competitor_top_rank": request.competitor_top_rank or 10,
+            "status": JobStatus.queued.value,
+            "total_seed_keywords": len(request.seed_keywords),
+            "total_competitor_domains": len(request.competitor_domains),
+            "error_message": None,
+        }
+        await self._request(
+            "POST",
+            "/keyword_expansion_runs",
+            json=payload,
+            headers={"Prefer": "resolution=merge-duplicates,return=minimal"},
+        )
+
+    async def update_run(
+        self,
+        job_id: str,
+        *,
+        status: JobStatus,
+        progress: dict[str, Any],
+        error_message: str | None = None,
+        started_at: str | None = None,
+        completed_at: str | None = None,
+        total_seed_rows: int | None = None,
+        total_competitor_rows: int | None = None,
+        deduped_keywords: int | None = None,
+    ) -> None:
+        if not self.enabled:
+            return
+
+        payload: dict[str, Any] = {
+            "status": status.value,
+            "total_api_calls": progress.get("total_api_calls", 0),
+            "error_message": error_message,
+        }
+        if started_at is not None:
+            payload["started_at"] = started_at
+        if completed_at is not None:
+            payload["completed_at"] = completed_at
+        if total_seed_rows is not None:
+            payload["total_seed_rows"] = total_seed_rows
+        if total_competitor_rows is not None:
+            payload["total_competitor_rows"] = total_competitor_rows
+        if deduped_keywords is not None:
+            payload["deduped_keywords"] = deduped_keywords
+
+        await self._request(
+            "PATCH",
+            "/keyword_expansion_runs",
+            json=payload,
+            params={"id": f"eq.{job_id}"},
+            headers={"Prefer": "return=minimal"},
+        )
+
+    async def insert_seeds_and_competitors(self, job_id: str, request: ExpandRequest) -> None:
+        if not self.enabled or not request.project_id:
+            return
+
+        if request.seed_keywords:
+            seed_rows = [
+                {
+                    "run_id": job_id,
+                    "project_id": request.project_id,
+                    "seed_index": index,
+                    "seed_keyword": seed_keyword,
+                }
+                for index, seed_keyword in enumerate(request.seed_keywords)
+            ]
+            await self._request(
+                "POST",
+                "/keyword_expansion_seeds",
+                json=seed_rows,
+                headers={"Prefer": "return=minimal"},
+            )
+
+        if request.competitor_domains:
+            competitor_rows = [
+                {
+                    "run_id": job_id,
+                    "project_id": request.project_id,
+                    "competitor_index": index,
+                    "domain": domain,
+                }
+                for index, domain in enumerate(request.competitor_domains)
+            ]
+            await self._request(
+                "POST",
+                "/keyword_expansion_competitors",
+                json=competitor_rows,
+                headers={"Prefer": "return=minimal"},
+            )
+
+        if request.client_websites:
+            client_rows = [
+                {
+                    "run_id": job_id,
+                    "project_id": request.project_id,
+                    "competitor_index": index + len(request.competitor_domains),
+                    "domain": domain,
+                }
+                for index, domain in enumerate(request.client_websites)
+            ]
+            await self._request(
+                "POST",
+                "/keyword_expansion_competitors",
+                json=client_rows,
+                headers={"Prefer": "return=minimal"},
+            )
+
+    async def insert_keywords_and_sources(
+        self,
+        job_id: str,
+        project_id: str,
+        rows: list[dict[str, Any]],
+        seeds: list[str],
+        competitors: list[str],
+        client_websites: list[str],
+    ) -> None:
+        if not self.enabled:
+            return
+
+        keyword_rows = [
+            {
+                "run_id": job_id,
+                "project_id": project_id,
+                "keyword": row["keyword"],
+                "normalized_keyword": normalize_keyword_key(row["keyword"]),
+                "search_volume": row.get("search_volume"),
+                "latest_monthly_search_volume": row.get("latest_monthly_search_volume"),
+                "volume_source": row.get("volume_source") or "missing",
+                "cpc": row.get("cpc"),
+                "competition": row.get("competition"),
+                "low_top_of_page_bid": row.get("low_top_of_page_bid"),
+                "high_top_of_page_bid": row.get("high_top_of_page_bid"),
+                "monthly_searches_json": row.get("monthly_searches_json"),
+                "source_ref_count": len(row.get("source_refs") or []),
+            }
+            for row in rows
+        ]
+
+        inserted_keywords = await self._request(
+            "POST",
+            "/keyword_expansion_keywords",
+            json=keyword_rows,
+            headers={"Prefer": "return=representation"},
+        )
+
+        keyword_id_by_normalized = {
+            item["normalized_keyword"]: item["id"]
+            for item in (inserted_keywords or [])
+            if isinstance(item, dict) and item.get("normalized_keyword") and item.get("id")
+        }
+
+        source_rows: list[dict[str, Any]] = []
+        for row in rows:
+            keyword_id = keyword_id_by_normalized.get(normalize_keyword_key(row["keyword"]))
+            if not keyword_id:
+                continue
+            for source in row.get("sources") or []:
+                source_type = source.get("source_type")
+                source_index = source.get("source_index")
+                if source_type not in {"seed", "competitor", "client_website"} or source_index is None:
+                    continue
+                source_value = ""
+                if source_type == "seed" and 0 <= source_index < len(seeds):
+                    source_value = seeds[source_index]
+                elif source_type == "competitor" and 0 <= source_index < len(competitors):
+                    source_value = competitors[source_index]
+                elif source_type == "client_website" and 0 <= source_index < len(client_websites):
+                    source_value = client_websites[source_index]
+                source_rows.append(
+                    {
+                        "run_id": job_id,
+                        "project_id": project_id,
+                        "keyword_id": keyword_id,
+                        "source_type": source_type,
+                        "source_index": source_index,
+                        "source_value": source_value,
+                        "rank_group": source.get("rank_group"),
+                        "rank_absolute": source.get("rank_absolute"),
+                    }
+                )
+
+        if source_rows:
+            await self._request(
+                "POST",
+                "/keyword_expansion_keyword_sources",
+                json=source_rows,
+                headers={"Prefer": "return=minimal"},
+            )
+
+
 def extract_task_result(data: dict[str, Any]) -> dict[str, Any]:
     tasks = data.get("tasks")
     if not isinstance(tasks, list) or not tasks:
@@ -344,11 +672,28 @@ def extract_seed_rows(result: dict[str, Any], seed_index: int) -> list[dict[str,
         keyword = clean_text(item.get("keyword"))
         if not keyword:
             continue
+        keyword_info = item.get("keyword_info")
+        volume_details = resolve_effective_volume_details(keyword_info)
         rows.append(
             {
                 "keyword": keyword,
-                "search_volume": resolve_effective_volume(item.get("keyword_info")),
-                "source_refs": [f"s{seed_index}"],
+                "search_volume": volume_details["search_volume"],
+                "latest_monthly_search_volume": volume_details["latest_monthly_search_volume"],
+                "volume_source": volume_details["volume_source"],
+                "cpc": parse_float((keyword_info or {}).get("cpc")),
+                "competition": parse_float((keyword_info or {}).get("competition")),
+                "low_top_of_page_bid": parse_float((keyword_info or {}).get("low_top_of_page_bid")),
+                "high_top_of_page_bid": parse_float((keyword_info or {}).get("high_top_of_page_bid")),
+                "monthly_searches_json": (keyword_info or {}).get("monthly_searches"),
+                "sources": [
+                    {
+                        "ref": f"s{seed_index}",
+                        "source_type": "seed",
+                        "source_index": seed_index,
+                        "rank_group": None,
+                        "rank_absolute": None,
+                    }
+                ],
             }
         )
     return rows
@@ -369,11 +714,72 @@ def extract_competitor_rows(result: dict[str, Any], competitor_index: int) -> li
         keyword = clean_text(keyword_data.get("keyword"))
         if not keyword:
             continue
+        keyword_info = keyword_data.get("keyword_info")
+        volume_details = resolve_effective_volume_details(keyword_info)
+        serp_item = (((item.get("ranked_serp_element") or {}).get("serp_item")) or {})
         rows.append(
             {
                 "keyword": keyword,
-                "search_volume": resolve_effective_volume(keyword_data.get("keyword_info")),
-                "source_refs": [f"c{competitor_index}"],
+                "search_volume": volume_details["search_volume"],
+                "latest_monthly_search_volume": volume_details["latest_monthly_search_volume"],
+                "volume_source": volume_details["volume_source"],
+                "cpc": parse_float((keyword_info or {}).get("cpc")),
+                "competition": parse_float((keyword_info or {}).get("competition")),
+                "low_top_of_page_bid": parse_float((keyword_info or {}).get("low_top_of_page_bid")),
+                "high_top_of_page_bid": parse_float((keyword_info or {}).get("high_top_of_page_bid")),
+                "monthly_searches_json": (keyword_info or {}).get("monthly_searches"),
+                "sources": [
+                    {
+                        "ref": f"c{competitor_index}",
+                        "source_type": "competitor",
+                        "source_index": competitor_index,
+                        "rank_group": parse_int(serp_item.get("rank_group")),
+                        "rank_absolute": parse_int(serp_item.get("rank_absolute")),
+                    }
+                ],
+            }
+        )
+    return rows
+
+
+def extract_client_website_rows(result: dict[str, Any], website_index: int) -> list[dict[str, Any]]:
+    items = result.get("items")
+    if not isinstance(items, list):
+        return []
+
+    rows: list[dict[str, Any]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        keyword_data = item.get("keyword_data")
+        if not isinstance(keyword_data, dict):
+            continue
+        keyword = clean_text(keyword_data.get("keyword"))
+        if not keyword:
+            continue
+        keyword_info = keyword_data.get("keyword_info")
+        volume_details = resolve_effective_volume_details(keyword_info)
+        serp_item = (((item.get("ranked_serp_element") or {}).get("serp_item")) or {})
+        rows.append(
+            {
+                "keyword": keyword,
+                "search_volume": volume_details["search_volume"],
+                "latest_monthly_search_volume": volume_details["latest_monthly_search_volume"],
+                "volume_source": volume_details["volume_source"],
+                "cpc": parse_float((keyword_info or {}).get("cpc")),
+                "competition": parse_float((keyword_info or {}).get("competition")),
+                "low_top_of_page_bid": parse_float((keyword_info or {}).get("low_top_of_page_bid")),
+                "high_top_of_page_bid": parse_float((keyword_info or {}).get("high_top_of_page_bid")),
+                "monthly_searches_json": (keyword_info or {}).get("monthly_searches"),
+                "sources": [
+                    {
+                        "ref": f"w{website_index}",
+                        "source_type": "client_website",
+                        "source_index": website_index,
+                        "rank_group": parse_int(serp_item.get("rank_group")),
+                        "rank_absolute": parse_int(serp_item.get("rank_absolute")),
+                    }
+                ],
             }
         )
     return rows
@@ -486,20 +892,54 @@ def dedupe_keywords(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             deduped[normalized_key] = {
                 "keyword": keyword,
                 "search_volume": volume,
-                "source_refs": list(row.get("source_refs") or []),
+                "latest_monthly_search_volume": row.get("latest_monthly_search_volume"),
+                "volume_source": row.get("volume_source") or "missing",
+                "cpc": row.get("cpc"),
+                "competition": row.get("competition"),
+                "low_top_of_page_bid": row.get("low_top_of_page_bid"),
+                "high_top_of_page_bid": row.get("high_top_of_page_bid"),
+                "monthly_searches_json": row.get("monthly_searches_json"),
+                "sources": list(row.get("sources") or []),
+                "source_refs": [source.get("ref") for source in (row.get("sources") or []) if source.get("ref")],
             }
             continue
 
         current_volume = current.get("search_volume")
         current_score = current_volume if isinstance(current_volume, int) else -1
         next_score = volume if isinstance(volume, int) else -1
-        current["source_refs"] = dedupe_preserve_order(
-            [*current.get("source_refs", []), *(row.get("source_refs") or [])]
-        )
+        source_map = {
+            source["ref"]: source
+            for source in current.get("sources", [])
+            if isinstance(source, dict) and source.get("ref")
+        }
+        for source in row.get("sources") or []:
+            ref = source.get("ref")
+            if not ref:
+                continue
+            existing = source_map.get(ref)
+            if existing is None:
+                source_map[ref] = source
+                continue
+            existing_rank = existing.get("rank_group")
+            next_rank = source.get("rank_group")
+            if isinstance(next_rank, int) and (
+                not isinstance(existing_rank, int) or next_rank < existing_rank
+            ):
+                source_map[ref] = source
+
+        current["sources"] = list(source_map.values())
+        current["source_refs"] = dedupe_preserve_order(list(source_map.keys()))
 
         if next_score > current_score:
             current["keyword"] = keyword
             current["search_volume"] = volume
+            current["latest_monthly_search_volume"] = row.get("latest_monthly_search_volume")
+            current["volume_source"] = row.get("volume_source") or "missing"
+            current["cpc"] = row.get("cpc")
+            current["competition"] = row.get("competition")
+            current["low_top_of_page_bid"] = row.get("low_top_of_page_bid")
+            current["high_top_of_page_bid"] = row.get("high_top_of_page_bid")
+            current["monthly_searches_json"] = row.get("monthly_searches_json")
 
     return sorted(
         deduped.values(),
@@ -510,7 +950,12 @@ def dedupe_keywords(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     )
 
 
-def resolve_source_ref_label(source_ref: str, seeds: list[str], competitors: list[str]) -> str:
+def resolve_source_ref_label(
+    source_ref: str,
+    seeds: list[str],
+    competitors: list[str],
+    client_websites: list[str],
+) -> str:
     ref = clean_text(source_ref)
     if len(ref) < 2:
         return ref
@@ -525,17 +970,24 @@ def resolve_source_ref_label(source_ref: str, seeds: list[str], competitors: lis
         return seeds[index]
     if prefix == "c" and 0 <= index < len(competitors):
         return competitors[index]
+    if prefix == "w" and 0 <= index < len(client_websites):
+        return client_websites[index]
     return ref
 
 
-def build_csv_text(rows: list[dict[str, Any]], seeds: list[str], competitors: list[str]) -> str:
+def build_csv_text(
+    rows: list[dict[str, Any]],
+    seeds: list[str],
+    competitors: list[str],
+    client_websites: list[str],
+) -> str:
     buffer = io.StringIO()
     writer = csv.writer(buffer, lineterminator="\n")
     writer.writerow(["keyword", "search_volume", "source_refs"])
     for row in rows:
         value = row["search_volume"] if isinstance(row["search_volume"], int) else "-"
         source_labels = [
-            resolve_source_ref_label(source_ref, seeds, competitors)
+            resolve_source_ref_label(source_ref, seeds, competitors, client_websites)
             for source_ref in (row.get("source_refs") or [])
         ]
         writer.writerow(
@@ -563,20 +1015,33 @@ async def run_expand_job(job_id: str) -> None:
             "completed_seed_keywords": 0,
             "total_competitor_domains": len(job.request.competitor_domains),
             "completed_competitor_domains": 0,
+            "total_client_websites": len(job.request.client_websites),
+            "completed_client_websites": 0,
             "total_api_calls": 0,
             "current_item": None,
             "message": "Starting seed keyword expansion",
         }
 
     client = DataForSEOClient()
+    persistence = SupabasePersistence()
     location_name = job.request.location_name
     seed_page_size = job.request.seed_limit_per_page
     competitor_page_size = job.request.competitor_limit_per_page
     competitor_top_rank = job.request.competitor_top_rank
     seed_rows: list[dict[str, Any]] = []
     competitor_rows: list[dict[str, Any]] = []
+    client_website_rows: list[dict[str, Any]] = []
 
     try:
+        await persistence.create_run(job_id, job.request)
+        await persistence.update_run(
+            job_id,
+            status=JobStatus.running,
+            progress=job.progress,
+            started_at=job.started_at,
+        )
+        await persistence.insert_seeds_and_competitors(job_id, job.request)
+
         for seed_index, seed_keyword in enumerate(job.request.seed_keywords):
             current_rows = await expand_seed_keyword(
                 client=client,
@@ -605,33 +1070,74 @@ async def run_expand_job(job_id: str) -> None:
             competitor_rows.extend(current_rows)
             job.progress["completed_competitor_domains"] += 1
 
+        job.progress["phase"] = "client_website_expansion"
+        job.progress["message"] = "Collecting client website ranking keywords"
+
+        for website_index, domain in enumerate(job.request.client_websites):
+            current_rows = await fetch_competitor_keywords(
+                client=client,
+                location_name=location_name,
+                page_size=competitor_page_size,
+                top_rank=competitor_top_rank,
+                competitor_index=website_index,
+                domain=domain,
+                progress=job.progress,
+            )
+            normalized_rows = []
+            for row in current_rows:
+                next_sources = []
+                for source in row.get("sources") or []:
+                    next_sources.append(
+                        {
+                            **source,
+                            "ref": f"w{website_index}",
+                            "source_type": "client_website",
+                            "source_index": website_index,
+                        }
+                    )
+                normalized_rows.append({**row, "sources": next_sources})
+
+            client_website_rows.extend(normalized_rows)
+            job.progress["completed_client_websites"] += 1
+
         job.progress["phase"] = "dedupe"
         job.progress["current_item"] = None
         job.progress["message"] = "Combining and deduplicating keywords"
 
-        merged_rows = dedupe_keywords(seed_rows + competitor_rows)
+        merged_rows = dedupe_keywords(seed_rows + competitor_rows + client_website_rows)
         csv_text = build_csv_text(
             merged_rows,
             seeds=job.request.seed_keywords,
             competitors=job.request.competitor_domains,
+            client_websites=job.request.client_websites,
         )
         result = {
             "summary": {
                 "total_seed_keywords": len(job.request.seed_keywords),
                 "total_competitor_domains": len(job.request.competitor_domains),
+                "total_client_websites": len(job.request.client_websites),
                 "total_seed_rows": len(seed_rows),
                 "total_competitor_rows": len(competitor_rows),
+                "total_client_website_rows": len(client_website_rows),
                 "deduped_keywords": len(merged_rows),
                 "total_api_calls": job.progress["total_api_calls"],
             },
             "source_catalog": {
                 "s": job.request.seed_keywords,
                 "c": job.request.competitor_domains,
+                "w": job.request.client_websites,
             },
             "keywords": [
                 {
                     "keyword": row["keyword"],
                     "search_volume": row["search_volume"] if isinstance(row["search_volume"], int) else "-",
+                    "volume_source": row.get("volume_source"),
+                    "latest_monthly_search_volume": row.get("latest_monthly_search_volume"),
+                    "cpc": row.get("cpc"),
+                    "competition": row.get("competition"),
+                    "low_top_of_page_bid": row.get("low_top_of_page_bid"),
+                    "high_top_of_page_bid": row.get("high_top_of_page_bid"),
+                    "source_count": len(row.get("source_refs") or []),
                     "source_refs": row.get("source_refs") or [],
                 }
                 for row in merged_rows
@@ -645,6 +1151,25 @@ async def run_expand_job(job_id: str) -> None:
             job.progress["message"] = "Keyword expansion complete"
             job.result = result
             job.csv_text = csv_text
+
+        if job.request.project_id:
+            await persistence.insert_keywords_and_sources(
+                job_id=job_id,
+                project_id=job.request.project_id,
+                rows=merged_rows,
+                seeds=job.request.seed_keywords,
+                competitors=job.request.competitor_domains,
+                client_websites=job.request.client_websites,
+            )
+        await persistence.update_run(
+            job_id,
+            status=JobStatus.completed,
+            progress=job.progress,
+            completed_at=job.completed_at,
+            total_seed_rows=len(seed_rows),
+            total_competitor_rows=len(competitor_rows),
+            deduped_keywords=len(merged_rows),
+        )
     except Exception as exc:
         async with jobs_lock:
             job.status = JobStatus.failed
@@ -653,8 +1178,21 @@ async def run_expand_job(job_id: str) -> None:
             job.progress["phase"] = "failed"
             job.progress["message"] = "Keyword expansion failed"
             job.progress["current_item"] = None
+        try:
+            await persistence.update_run(
+                job_id,
+                status=JobStatus.failed,
+                progress=job.progress,
+                error_message=str(exc),
+                completed_at=job.completed_at,
+                total_seed_rows=len(seed_rows),
+                total_competitor_rows=len(competitor_rows),
+            )
+        except Exception:
+            pass
     finally:
         await client.close()
+        await persistence.close()
 
 
 def serialize_job(job: StoredJob, include_result: bool = False) -> JobDetail:
@@ -674,6 +1212,19 @@ def serialize_job(job: StoredJob, include_result: bool = False) -> JobDetail:
 
 
 app = FastAPI(title="Step 2 — Keyword Expansion", version="0.1.0")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:3001",
+        "http://127.0.0.1:3001",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 @app.get("/health")

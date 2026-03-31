@@ -20,17 +20,24 @@ export function Sidebar({ steps, onStepClick }: SidebarProps) {
       {steps.map((step, i) => {
         const isActive = step.state === 'active';
         const isComplete = step.state === 'complete';
+        const isPending = step.state === 'pending';
+        const isClickable = !isPending || step.id === 'seeds';
 
         return (
           <button
             key={step.id}
-            onClick={() => onStepClick(step.id)}
+            onClick={() => {
+              if (isClickable) onStepClick(step.id);
+            }}
+            disabled={!isClickable}
             className={`relative flex items-center gap-2.5 px-4 py-2 w-full text-left text-[13.5px] font-normal border-none transition-colors cursor-pointer bg-transparent ${
               isActive
                 ? 'bg-[#e8f1fb] text-[#0071e3] font-medium'
                 : isComplete
                 ? 'text-[#6e6e73] hover:bg-[#f5f5f7]'
-                : 'text-[#d2d2d7] cursor-default'
+                : isClickable
+                ? 'text-[#aeaeb2] hover:bg-[#f5f5f7]'
+                : 'text-[#d2d2d7] cursor-not-allowed'
             }`}
           >
             {/* Active indicator bar */}
