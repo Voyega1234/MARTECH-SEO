@@ -11,7 +11,7 @@ Async job API for the new keyword expansion step.
 - Deduplicates by keyword after removing spaces
 - Uses `keyword_info.search_volume` first
 - If `search_volume` is missing or `0`, falls back to the latest `monthly_searches` value
-- Includes `main_intent` when available
+- Includes compact provenance via `source_catalog` and per-keyword `source_refs`
 - Exports both JSON results and CSV
 
 ## Environment
@@ -47,7 +47,8 @@ Request body:
   "competitor_domains": ["example.com", "example.org"],
   "location_name": "Thailand",
   "seed_limit_per_page": 500,
-  "competitor_limit_per_page": 200
+  "competitor_limit_per_page": 200,
+  "competitor_top_rank": 10
 }
 ```
 
@@ -57,6 +58,7 @@ Notes:
 - `location_name` is optional and defaults to `Thailand`
 - `seed_limit_per_page` is an advanced optional setting and defaults to `500`
 - `competitor_limit_per_page` is an advanced optional setting and defaults to `200`
+- `competitor_top_rank` is an advanced optional setting and defaults to `10`; this keeps only competitor keywords with `rank_group` in positions `1-10`
 - Seed expansion paginates to full exhaustion using `offset += seed_limit_per_page`
 - Competitor expansion paginates to full exhaustion using `offset += competitor_limit_per_page`
 
@@ -74,13 +76,32 @@ Downloads the completed CSV output.
 
 ## Output format
 
+JSON result shape:
+
+```json
+{
+  "summary": {},
+  "source_catalog": {
+    "s": ["โซล่าเซลล์", "solar cell"],
+    "c": ["lamptan.com"]
+  },
+  "keywords": [
+    {
+      "keyword": "ติดตั้งโซล่าเซลล์",
+      "search_volume": 2900,
+      "source_refs": ["s0", "c0"]
+    }
+  ]
+}
+```
+
 CSV:
 
 ```csv
-keyword,search_volume,main_intent
-โซล่าเซลล์,40500,transactional
-solar cell,9900,commercial
-โซล่าเซลล์ facebook,-,
+keyword,search_volume,source_refs
+โซล่าเซลล์,40500,โซล่าเซลล์|lamptan.com
+solar cell,9900,solar cell
+โซล่าเซลล์ facebook,-,โซล่าเซลล์
 ```
 
 ## Notes

@@ -42,6 +42,7 @@ class ExpandRequest(BaseModel):
     location_name: str = Field(default=DFS_LOCATION_NAME)
     seed_limit_per_page: int = Field(default=DEFAULT_SEED_PAGE_SIZE, ge=1, le=1000)
     competitor_limit_per_page: int = Field(default=DEFAULT_COMPETITOR_PAGE_SIZE, ge=1, le=1000)
+    competitor_top_rank: int | None = Field(default=10, ge=1, le=100)
 
     @field_validator("seed_keywords", mode="before")
     @classmethod
@@ -82,11 +83,17 @@ class JobSummary(BaseModel):
 class KeywordResultRow(BaseModel):
     keyword: str
     search_volume: int | str
-    main_intent: str | None = None
+    source_refs: list[str] = Field(default_factory=list)
+
+
+class SourceCatalog(BaseModel):
+    s: list[str]
+    c: list[str]
 
 
 class JobResult(BaseModel):
     summary: JobSummary
+    source_catalog: SourceCatalog
     keywords: list[KeywordResultRow]
 
 
@@ -235,13 +242,6 @@ def resolve_effective_volume(keyword_info: dict[str, Any] | None) -> int | None:
     return direct_volume
 
 
-def extract_search_intent(search_intent_info: Any) -> str | None:
-    if not isinstance(search_intent_info, dict):
-        return None
-
-    return clean_text(search_intent_info.get("main_intent")) or None
-
-
 class ProcessRateLimiter:
     def __init__(self, max_concurrent: int, min_interval_seconds: float) -> None:
         self._semaphore = asyncio.Semaphore(max_concurrent)
@@ -332,7 +332,7 @@ def extract_task_result(data: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-def extract_seed_rows(result: dict[str, Any]) -> list[dict[str, Any]]:
+def extract_seed_rows(result: dict[str, Any], seed_index: int) -> list[dict[str, Any]]:
     items = result.get("items")
     if not isinstance(items, list):
         return []
@@ -344,19 +344,17 @@ def extract_seed_rows(result: dict[str, Any]) -> list[dict[str, Any]]:
         keyword = clean_text(item.get("keyword"))
         if not keyword:
             continue
-        main_intent = extract_search_intent(item.get("search_intent_info"))
         rows.append(
             {
                 "keyword": keyword,
                 "search_volume": resolve_effective_volume(item.get("keyword_info")),
-                "main_intent": main_intent,
-                "source": "seed_expansion",
+                "source_refs": [f"s{seed_index}"],
             }
         )
     return rows
 
 
-def extract_competitor_rows(result: dict[str, Any]) -> list[dict[str, Any]]:
+def extract_competitor_rows(result: dict[str, Any], competitor_index: int) -> list[dict[str, Any]]:
     items = result.get("items")
     if not isinstance(items, list):
         return []
@@ -371,13 +369,11 @@ def extract_competitor_rows(result: dict[str, Any]) -> list[dict[str, Any]]:
         keyword = clean_text(keyword_data.get("keyword"))
         if not keyword:
             continue
-        main_intent = extract_search_intent(item.get("search_intent_info"))
         rows.append(
             {
                 "keyword": keyword,
                 "search_volume": resolve_effective_volume(keyword_data.get("keyword_info")),
-                "main_intent": main_intent,
-                "source": "competitor_rankings",
+                "source_refs": [f"c{competitor_index}"],
             }
         )
     return rows
@@ -387,6 +383,7 @@ async def expand_seed_keyword(
     client: DataForSEOClient,
     location_name: str,
     page_size: int,
+    seed_index: int,
     seed_keyword: str,
     progress: dict[str, Any],
 ) -> list[dict[str, Any]]:
@@ -412,7 +409,7 @@ async def expand_seed_keyword(
         data = await client.post_live("/dataforseo_labs/google/keyword_suggestions/live", payload)
         progress["total_api_calls"] += 1
         result = extract_task_result(data)
-        current_rows = extract_seed_rows(result)
+        current_rows = extract_seed_rows(result, seed_index)
         rows.extend(current_rows)
 
         if len(current_rows) < page_size:
@@ -426,6 +423,8 @@ async def fetch_competitor_keywords(
     client: DataForSEOClient,
     location_name: str,
     page_size: int,
+    top_rank: int | None,
+    competitor_index: int,
     domain: str,
     progress: dict[str, Any],
 ) -> list[dict[str, Any]]:
@@ -445,13 +444,22 @@ async def fetch_competitor_keywords(
                 "limit": page_size,
                 "offset": offset,
                 "order_by": ["keyword_data.keyword_info.search_volume,desc"],
+                **(
+                    {
+                        "filters": [
+                            ["ranked_serp_element.serp_item.rank_group", "<=", top_rank],
+                        ]
+                    }
+                    if top_rank is not None
+                    else {}
+                ),
             }
         ]
 
         data = await client.post_live("/dataforseo_labs/google/ranked_keywords/live", payload)
         progress["total_api_calls"] += 1
         result = extract_task_result(data)
-        current_rows = extract_competitor_rows(result)
+        current_rows = extract_competitor_rows(result, competitor_index)
         rows.extend(current_rows)
 
         if len(current_rows) < page_size:
@@ -478,22 +486,20 @@ def dedupe_keywords(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             deduped[normalized_key] = {
                 "keyword": keyword,
                 "search_volume": volume,
-                "main_intent": row.get("main_intent"),
+                "source_refs": list(row.get("source_refs") or []),
             }
             continue
 
         current_volume = current.get("search_volume")
         current_score = current_volume if isinstance(current_volume, int) else -1
         next_score = volume if isinstance(volume, int) else -1
-
-        if not current.get("main_intent") and row.get("main_intent"):
-            current["main_intent"] = row.get("main_intent")
+        current["source_refs"] = dedupe_preserve_order(
+            [*current.get("source_refs", []), *(row.get("source_refs") or [])]
+        )
 
         if next_score > current_score:
             current["keyword"] = keyword
             current["search_volume"] = volume
-            if row.get("main_intent"):
-                current["main_intent"] = row.get("main_intent")
 
     return sorted(
         deduped.values(),
@@ -504,17 +510,39 @@ def dedupe_keywords(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     )
 
 
-def build_csv_text(rows: list[dict[str, Any]]) -> str:
+def resolve_source_ref_label(source_ref: str, seeds: list[str], competitors: list[str]) -> str:
+    ref = clean_text(source_ref)
+    if len(ref) < 2:
+        return ref
+
+    prefix = ref[0]
+    try:
+        index = int(ref[1:])
+    except ValueError:
+        return ref
+
+    if prefix == "s" and 0 <= index < len(seeds):
+        return seeds[index]
+    if prefix == "c" and 0 <= index < len(competitors):
+        return competitors[index]
+    return ref
+
+
+def build_csv_text(rows: list[dict[str, Any]], seeds: list[str], competitors: list[str]) -> str:
     buffer = io.StringIO()
     writer = csv.writer(buffer, lineterminator="\n")
-    writer.writerow(["keyword", "search_volume", "main_intent"])
+    writer.writerow(["keyword", "search_volume", "source_refs"])
     for row in rows:
         value = row["search_volume"] if isinstance(row["search_volume"], int) else "-"
+        source_labels = [
+            resolve_source_ref_label(source_ref, seeds, competitors)
+            for source_ref in (row.get("source_refs") or [])
+        ]
         writer.writerow(
             [
                 row["keyword"],
                 value,
-                row.get("main_intent") or "",
+                "|".join(source_labels),
             ]
         )
     return buffer.getvalue()
@@ -544,15 +572,17 @@ async def run_expand_job(job_id: str) -> None:
     location_name = job.request.location_name
     seed_page_size = job.request.seed_limit_per_page
     competitor_page_size = job.request.competitor_limit_per_page
+    competitor_top_rank = job.request.competitor_top_rank
     seed_rows: list[dict[str, Any]] = []
     competitor_rows: list[dict[str, Any]] = []
 
     try:
-        for seed_keyword in job.request.seed_keywords:
+        for seed_index, seed_keyword in enumerate(job.request.seed_keywords):
             current_rows = await expand_seed_keyword(
                 client=client,
                 location_name=location_name,
                 page_size=seed_page_size,
+                seed_index=seed_index,
                 seed_keyword=seed_keyword,
                 progress=job.progress,
             )
@@ -562,11 +592,13 @@ async def run_expand_job(job_id: str) -> None:
         job.progress["phase"] = "competitor_expansion"
         job.progress["message"] = "Collecting competitor ranking keywords"
 
-        for domain in job.request.competitor_domains:
+        for competitor_index, domain in enumerate(job.request.competitor_domains):
             current_rows = await fetch_competitor_keywords(
                 client=client,
                 location_name=location_name,
                 page_size=competitor_page_size,
+                top_rank=competitor_top_rank,
+                competitor_index=competitor_index,
                 domain=domain,
                 progress=job.progress,
             )
@@ -578,7 +610,11 @@ async def run_expand_job(job_id: str) -> None:
         job.progress["message"] = "Combining and deduplicating keywords"
 
         merged_rows = dedupe_keywords(seed_rows + competitor_rows)
-        csv_text = build_csv_text(merged_rows)
+        csv_text = build_csv_text(
+            merged_rows,
+            seeds=job.request.seed_keywords,
+            competitors=job.request.competitor_domains,
+        )
         result = {
             "summary": {
                 "total_seed_keywords": len(job.request.seed_keywords),
@@ -588,11 +624,15 @@ async def run_expand_job(job_id: str) -> None:
                 "deduped_keywords": len(merged_rows),
                 "total_api_calls": job.progress["total_api_calls"],
             },
+            "source_catalog": {
+                "s": job.request.seed_keywords,
+                "c": job.request.competitor_domains,
+            },
             "keywords": [
                 {
                     "keyword": row["keyword"],
                     "search_volume": row["search_volume"] if isinstance(row["search_volume"], int) else "-",
-                    "main_intent": row.get("main_intent"),
+                    "source_refs": row.get("source_refs") or [],
                 }
                 for row in merged_rows
             ],
