@@ -25,6 +25,7 @@ Notes:
 
 - `VITE_STEP2_API_BASE_URL` should point to the FastAPI service root.
 - `VITE_STEP3_API_BASE_URL` should include `/api/keywords` because the Express server mounts keyword routes there.
+- Step 2 allows browser CORS from any origin because it does not rely on cookies or browser credentials.
 
 ## Step 2 service on Render
 
@@ -37,7 +38,6 @@ DFS_API_LOGIN=...
 DFS_API_PASSWORD=...
 SUPABASE_URL=...
 SUPABASE_SERVICE_ROLE_KEY=...
-FRONTEND_ORIGINS=https://YOUR-VERCEL-DOMAIN.vercel.app,https://YOUR-CUSTOM-DOMAIN.com
 ```
 
 Start command example:

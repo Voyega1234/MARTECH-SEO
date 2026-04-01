@@ -1291,23 +1291,10 @@ def serialize_job(job: StoredJob, include_result: bool = False) -> JobDetail:
 
 app = FastAPI(title="Step 2 — Keyword Expansion", version="0.1.0")
 
-_default_allowed_origins = [
-    "http://localhost:3000",
-    "http://127.0.0.1:3000",
-    "http://localhost:3001",
-    "http://127.0.0.1:3001",
-]
-_extra_allowed_origins = [
-    origin.strip()
-    for origin in (os.getenv("FRONTEND_ORIGINS") or "").split(",")
-    if origin.strip()
-]
-_allowed_origins = list(dict.fromkeys(_default_allowed_origins + _extra_allowed_origins))
-
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=_allowed_origins,
-    allow_credentials=True,
+    allow_origins=["*"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
