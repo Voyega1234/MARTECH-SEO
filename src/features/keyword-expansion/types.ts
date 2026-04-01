@@ -15,6 +15,15 @@ export interface SeedKeywordResponse {
   raw: string;
 }
 
+export interface KeywordRelevanceFilterResponse {
+  success: boolean;
+  relevant_keywords: KeywordExpansionKeywordRow[];
+  input_keyword_count: number;
+  relevant_keyword_count: number;
+  batch_count: number;
+  raw: string;
+}
+
 export interface KeywordExpansionJobCreated {
   job_id: string;
   status: 'queued' | 'running' | 'completed' | 'failed';
@@ -53,6 +62,10 @@ export interface KeywordExpansionKeywordRow {
   competition?: number | null;
   low_top_of_page_bid?: number | null;
   high_top_of_page_bid?: number | null;
+  best_competitor_rank_group?: number | null;
+  best_competitor_rank_absolute?: number | null;
+  best_client_website_rank_group?: number | null;
+  best_client_website_rank_absolute?: number | null;
   source_count?: number;
   source_refs: string[];
 }
@@ -76,4 +89,89 @@ export interface KeywordExpansionJob {
   progress: KeywordExpansionJobProgress;
   error: string | null;
   result?: KeywordExpansionResult;
+}
+
+export type KeywordGroupingPlanIntent = 'T' | 'C' | 'I' | 'N';
+
+export interface KeywordGroupingPlanPillar {
+  name: string;
+  intent: KeywordGroupingPlanIntent;
+}
+
+export interface KeywordGroupingPlanProductLine {
+  name: string;
+  pillars: KeywordGroupingPlanPillar[];
+}
+
+export interface KeywordGroupingPlan {
+  product_lines: KeywordGroupingPlanProductLine[];
+}
+
+export interface KeywordGroupingPlanResponse {
+  success: boolean;
+  plan: KeywordGroupingPlan;
+  raw: string;
+  input_keyword_count: number;
+  used_keyword_count: number;
+  truncated: boolean;
+  batch_count?: number;
+}
+
+export interface KeywordGroupingFinalGroupKeyword {
+  keyword: string;
+  search_volume: number | '-';
+}
+
+export interface KeywordGroupingFinalGroup {
+  product_line: string;
+  pillar: string;
+  intent: KeywordGroupingPlanIntent;
+  keyword_group: string;
+  slug: string;
+  keywords: KeywordGroupingFinalGroupKeyword[];
+}
+
+export interface KeywordGroupingFinalResultPayload {
+  groups: KeywordGroupingFinalGroup[];
+  csv: string;
+  group_count: number;
+  covered_keyword_count: number;
+  input_keyword_count: number;
+  batch_count: number;
+}
+
+export interface KeywordGroupingFinalResponse {
+  success: boolean;
+  result: KeywordGroupingFinalResultPayload;
+  raw: string;
+}
+
+export interface KeywordGroupingJobCreated {
+  job_id: string;
+  status: 'queued' | 'running' | 'completed' | 'failed';
+}
+
+export interface KeywordGroupingJobProgress {
+  phase: string;
+  total_plan_batches: number;
+  completed_plan_batches: number;
+  total_final_batches: number;
+  completed_final_batches: number;
+  current_batch: number | null;
+  input_keyword_count: number;
+  message: string | null;
+}
+
+export interface KeywordGroupingJobDetail {
+  job_id: string;
+  status: 'queued' | 'running' | 'completed' | 'failed';
+  created_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+  progress: KeywordGroupingJobProgress;
+  error: string | null;
+  plan?: KeywordGroupingPlan;
+  plan_raw?: string | null;
+  result?: KeywordGroupingFinalResultPayload;
+  raw?: string | null;
 }

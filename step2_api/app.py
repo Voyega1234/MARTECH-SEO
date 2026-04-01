@@ -104,6 +104,10 @@ class KeywordResultRow(BaseModel):
     competition: float | None = None
     low_top_of_page_bid: float | None = None
     high_top_of_page_bid: float | None = None
+    best_competitor_rank_group: int | None = None
+    best_competitor_rank_absolute: int | None = None
+    best_client_website_rank_group: int | None = None
+    best_client_website_rank_absolute: int | None = None
     source_count: int = 0
     source_refs: list[str] = Field(default_factory=list)
 
@@ -457,14 +461,24 @@ class SupabasePersistence:
             "status": JobStatus.queued.value,
             "total_seed_keywords": len(request.seed_keywords),
             "total_competitor_domains": len(request.competitor_domains),
+            "total_client_websites": len(request.client_websites),
             "error_message": None,
         }
-        await self._request(
-            "POST",
-            "/keyword_expansion_runs",
-            json=payload,
-            headers={"Prefer": "resolution=merge-duplicates,return=minimal"},
-        )
+        try:
+            await self._request(
+                "POST",
+                "/keyword_expansion_runs",
+                json=payload,
+                headers={"Prefer": "resolution=merge-duplicates,return=minimal"},
+            )
+        except httpx.HTTPStatusError:
+            legacy_payload = {k: v for k, v in payload.items() if k != "total_client_websites"}
+            await self._request(
+                "POST",
+                "/keyword_expansion_runs",
+                json=legacy_payload,
+                headers={"Prefer": "resolution=merge-duplicates,return=minimal"},
+            )
 
     async def update_run(
         self,
@@ -477,6 +491,7 @@ class SupabasePersistence:
         completed_at: str | None = None,
         total_seed_rows: int | None = None,
         total_competitor_rows: int | None = None,
+        total_client_website_rows: int | None = None,
         deduped_keywords: int | None = None,
     ) -> None:
         if not self.enabled:
@@ -495,16 +510,28 @@ class SupabasePersistence:
             payload["total_seed_rows"] = total_seed_rows
         if total_competitor_rows is not None:
             payload["total_competitor_rows"] = total_competitor_rows
+        if total_client_website_rows is not None:
+            payload["total_client_website_rows"] = total_client_website_rows
         if deduped_keywords is not None:
             payload["deduped_keywords"] = deduped_keywords
 
-        await self._request(
-            "PATCH",
-            "/keyword_expansion_runs",
-            json=payload,
-            params={"id": f"eq.{job_id}"},
-            headers={"Prefer": "return=minimal"},
-        )
+        try:
+            await self._request(
+                "PATCH",
+                "/keyword_expansion_runs",
+                json=payload,
+                params={"id": f"eq.{job_id}"},
+                headers={"Prefer": "return=minimal"},
+            )
+        except httpx.HTTPStatusError:
+            legacy_payload = {k: v for k, v in payload.items() if k != "total_client_website_rows"}
+            await self._request(
+                "PATCH",
+                "/keyword_expansion_runs",
+                json=legacy_payload,
+                params={"id": f"eq.{job_id}"},
+                headers={"Prefer": "return=minimal"},
+            )
 
     async def insert_seeds_and_competitors(self, job_id: str, request: ExpandRequest) -> None:
         if not self.enabled or not request.project_id:
@@ -545,11 +572,12 @@ class SupabasePersistence:
             )
 
         if request.client_websites:
+            competitor_count = len(request.competitor_domains)
             client_rows = [
                 {
                     "run_id": job_id,
                     "project_id": request.project_id,
-                    "competitor_index": index + len(request.competitor_domains),
+                    "competitor_index": competitor_count + index,
                     "domain": domain,
                 }
                 for index, domain in enumerate(request.client_websites)
@@ -785,6 +813,32 @@ def extract_client_website_rows(result: dict[str, Any], website_index: int) -> l
     return rows
 
 
+def get_best_rank_for_source_type(
+    sources: list[dict[str, Any]],
+    source_type: str,
+) -> tuple[int | None, int | None]:
+    ranked_sources = [
+        source
+        for source in sources
+        if isinstance(source, dict) and source.get("source_type") == source_type
+    ]
+    if not ranked_sources:
+        return None, None
+
+    best_group: int | None = None
+    best_absolute: int | None = None
+
+    for source in ranked_sources:
+        rank_group = source.get("rank_group")
+        rank_absolute = source.get("rank_absolute")
+        if isinstance(rank_group, int) and (best_group is None or rank_group < best_group):
+            best_group = rank_group
+        if isinstance(rank_absolute, int) and (best_absolute is None or rank_absolute < best_absolute):
+            best_absolute = rank_absolute
+
+    return best_group, best_absolute
+
+
 async def expand_seed_keyword(
     client: DataForSEOClient,
     location_name: str,
@@ -929,6 +983,14 @@ def dedupe_keywords(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
         current["sources"] = list(source_map.values())
         current["source_refs"] = dedupe_preserve_order(list(source_map.keys()))
+        (
+            current["best_competitor_rank_group"],
+            current["best_competitor_rank_absolute"],
+        ) = get_best_rank_for_source_type(current["sources"], "competitor")
+        (
+            current["best_client_website_rank_group"],
+            current["best_client_website_rank_absolute"],
+        ) = get_best_rank_for_source_type(current["sources"], "client_website")
 
         if next_score > current_score:
             current["keyword"] = keyword
@@ -940,6 +1002,16 @@ def dedupe_keywords(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             current["low_top_of_page_bid"] = row.get("low_top_of_page_bid")
             current["high_top_of_page_bid"] = row.get("high_top_of_page_bid")
             current["monthly_searches_json"] = row.get("monthly_searches_json")
+
+    for row in deduped.values():
+        (
+            row["best_competitor_rank_group"],
+            row["best_competitor_rank_absolute"],
+        ) = get_best_rank_for_source_type(row.get("sources") or [], "competitor")
+        (
+            row["best_client_website_rank_group"],
+            row["best_client_website_rank_absolute"],
+        ) = get_best_rank_for_source_type(row.get("sources") or [], "client_website")
 
     return sorted(
         deduped.values(),
@@ -1137,6 +1209,10 @@ async def run_expand_job(job_id: str) -> None:
                     "competition": row.get("competition"),
                     "low_top_of_page_bid": row.get("low_top_of_page_bid"),
                     "high_top_of_page_bid": row.get("high_top_of_page_bid"),
+                    "best_competitor_rank_group": row.get("best_competitor_rank_group"),
+                    "best_competitor_rank_absolute": row.get("best_competitor_rank_absolute"),
+                    "best_client_website_rank_group": row.get("best_client_website_rank_group"),
+                    "best_client_website_rank_absolute": row.get("best_client_website_rank_absolute"),
                     "source_count": len(row.get("source_refs") or []),
                     "source_refs": row.get("source_refs") or [],
                 }
@@ -1168,6 +1244,7 @@ async def run_expand_job(job_id: str) -> None:
             completed_at=job.completed_at,
             total_seed_rows=len(seed_rows),
             total_competitor_rows=len(competitor_rows),
+            total_client_website_rows=len(client_website_rows),
             deduped_keywords=len(merged_rows),
         )
     except Exception as exc:
@@ -1187,6 +1264,7 @@ async def run_expand_job(job_id: str) -> None:
                 completed_at=job.completed_at,
                 total_seed_rows=len(seed_rows),
                 total_competitor_rows=len(competitor_rows),
+                total_client_website_rows=len(client_website_rows),
             )
         except Exception:
             pass
@@ -1213,14 +1291,22 @@ def serialize_job(job: StoredJob, include_result: bool = False) -> JobDetail:
 
 app = FastAPI(title="Step 2 — Keyword Expansion", version="0.1.0")
 
+_default_allowed_origins = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "http://localhost:3001",
+    "http://127.0.0.1:3001",
+]
+_extra_allowed_origins = [
+    origin.strip()
+    for origin in (os.getenv("FRONTEND_ORIGINS") or "").split(",")
+    if origin.strip()
+]
+_allowed_origins = list(dict.fromkeys(_default_allowed_origins + _extra_allowed_origins))
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-        "http://localhost:3001",
-        "http://127.0.0.1:3001",
-    ],
+    allow_origins=_allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

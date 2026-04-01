@@ -73,6 +73,18 @@ export async function saveKeywordResult(projectId: string, keywordResult: string
   if (error) throw new Error(`Failed to save keywords: ${error.message}`);
 }
 
+export async function clearKeywordProjectSnapshot(projectId: string): Promise<void> {
+  const { error } = await supabase
+    .from('seo_projects')
+    .update({
+      keyword_result: null,
+      keyword_group_count: 0,
+    })
+    .eq('id', projectId);
+
+  if (error) throw new Error(`Failed to clear keyword snapshot: ${error.message}`);
+}
+
 // Save sitemap result to existing project
 export async function saveSitemapResult(projectId: string, sitemapResult: string): Promise<void> {
   let parsed: any = null;

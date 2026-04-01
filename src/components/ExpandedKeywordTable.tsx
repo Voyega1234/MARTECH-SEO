@@ -1,35 +1,21 @@
 import { memo, useDeferredValue, useEffect, useMemo, useState, useTransition } from 'react';
 import type { KeywordExpansionKeywordRow } from '../features/keyword-expansion/types';
 
-type OptionalColumn =
-  | 'source_refs'
-  | 'latest_monthly_search_volume'
-  | 'cpc'
-  | 'competition';
-
-const COLUMN_LABELS: Record<OptionalColumn, string> = {
-  source_refs: 'Sources',
-  latest_monthly_search_volume: 'Latest Monthly Volume',
-  cpc: 'CPC',
-  competition: 'Competition',
-};
-
-const DEFAULT_COLUMNS: OptionalColumn[] = ['source_refs', 'cpc', 'competition'];
-
 type SourceCatalog = {
   s: string[];
   c: string[];
   w: string[];
 };
 
-type SourceTypeFilter = 'all' | 'seed' | 'competitor' | 'client_website';
+type SourceTypeFilter = 'seed' | 'competitor' | 'client_website';
 
 const SOURCE_FILTER_LABELS: Record<SourceTypeFilter, string> = {
-  all: 'All Sources',
   seed: 'Seed',
   competitor: 'Competitor',
   client_website: 'Client Website',
 };
+
+const ALL_SOURCE_FILTERS: SourceTypeFilter[] = ['seed', 'competitor', 'client_website'];
 
 function escapeCsv(val: string) {
   if (val.includes(',') || val.includes('"') || val.includes('\n')) {
@@ -70,32 +56,45 @@ function sourceTypeFromRef(ref: string): SourceTypeFilter | null {
   return null;
 }
 
-function metricValue(
+function getRowSourceTypes(row: KeywordExpansionKeywordRow): SourceTypeFilter[] {
+  return Array.from(
+    new Set(
+      (row.source_refs || [])
+        .map((source) => sourceTypeFromRef(source))
+        .filter((source): source is SourceTypeFilter => Boolean(source))
+    )
+  );
+}
+
+function matchesSelectedSources(row: KeywordExpansionKeywordRow, selectedSources: SourceTypeFilter[]) {
+  const rowSourceTypes = getRowSourceTypes(row);
+  return rowSourceTypes.some((source) => selectedSources.includes(source));
+}
+
+function getRankValuesForSelectedSources(
   row: KeywordExpansionKeywordRow,
-  column: OptionalColumn,
-  sourceCatalog?: SourceCatalog
-): string {
-  const value = row[column];
-  if (Array.isArray(value)) {
-    if (column === 'source_refs') {
-      return value.map((ref) => resolveSourceRefValue(ref, sourceCatalog)).join(' | ');
-    }
-    return value.join(' | ');
+  selectedSources: SourceTypeFilter[]
+): number[] {
+  const ranks: number[] = [];
+
+  if (selectedSources.includes('competitor') && typeof row.best_competitor_rank_group === 'number') {
+    ranks.push(row.best_competitor_rank_group);
   }
-  if (value === null || value === undefined) return '-';
-  return String(value);
+  if (selectedSources.includes('client_website') && typeof row.best_client_website_rank_group === 'number') {
+    ranks.push(row.best_client_website_rank_group);
+  }
+
+  return ranks;
 }
 
 const TableRow = memo(function TableRow({
   row,
-  index,
-  visibleColumns,
-  sourceCatalog,
+  showCompetitorRank,
+  showClientWebsiteRank,
 }: {
   row: KeywordExpansionKeywordRow;
-  index: number;
-  visibleColumns: OptionalColumn[];
-  sourceCatalog?: SourceCatalog;
+  showCompetitorRank: boolean;
+  showClientWebsiteRank: boolean;
 }) {
   return (
     <tr className="border-b border-[#e8e8ed] hover:bg-[#f8fbff]">
@@ -105,11 +104,16 @@ const TableRow = memo(function TableRow({
       <td className="py-2.5 px-3.5 text-[13px] text-[#1d1d1f] font-mono align-top whitespace-nowrap">
         {row.search_volume}
       </td>
-      {visibleColumns.map((column) => (
-        <td key={`${index}-${column}`} className="py-2.5 px-3.5 text-[13px] text-[#6e6e73] align-top break-words">
-          {metricValue(row, column, sourceCatalog)}
+      {showCompetitorRank ? (
+        <td className="py-2.5 px-3.5 text-[13px] text-[#1d1d1f] font-mono align-top whitespace-nowrap">
+          {typeof row.best_competitor_rank_group === 'number' ? row.best_competitor_rank_group : '-'}
         </td>
-      ))}
+      ) : null}
+      {showClientWebsiteRank ? (
+        <td className="py-2.5 px-3.5 text-[13px] text-[#1d1d1f] font-mono align-top whitespace-nowrap">
+          {typeof row.best_client_website_rank_group === 'number' ? row.best_client_website_rank_group : '-'}
+        </td>
+      ) : null}
     </tr>
   );
 });
@@ -118,26 +122,55 @@ export function ExpandedKeywordTable({
   rows,
   projectName,
   sourceCatalog,
+  onFilteredRowsChange,
+  onSaveFilter,
+  isCurrentFilterSaved = true,
+  savedKeywordCount,
 }: {
   rows: KeywordExpansionKeywordRow[];
   projectName?: string;
   sourceCatalog?: SourceCatalog;
+  onFilteredRowsChange?: (rows: KeywordExpansionKeywordRow[]) => void;
+  onSaveFilter?: (rows: KeywordExpansionKeywordRow[]) => void;
+  isCurrentFilterSaved?: boolean;
+  savedKeywordCount?: number;
 }) {
   const [search, setSearch] = useState('');
-  const [visibleColumns, setVisibleColumns] = useState<OptionalColumn[]>(DEFAULT_COLUMNS);
-  const [minSearchVolume, setMinSearchVolume] = useState('');
-  const [sourceFilter, setSourceFilter] = useState<SourceTypeFilter>('all');
+  const [minSearchVolume, setMinSearchVolume] = useState('10');
+  const [selectedSources, setSelectedSources] = useState<SourceTypeFilter[]>(ALL_SOURCE_FILTERS);
+  const [maxRank, setMaxRank] = useState('');
+  const [showCompetitorRank, setShowCompetitorRank] = useState(false);
+  const [showClientWebsiteRank, setShowClientWebsiteRank] = useState(false);
   const [rowsPerPage, setRowsPerPage] = useState(100);
   const [page, setPage] = useState(1);
   const [isPending, startTransition] = useTransition();
   const deferredSearch = useDeferredValue(search);
-  const deferredVisibleColumns = useDeferredValue(visibleColumns);
   const deferredMinSearchVolume = useDeferredValue(minSearchVolume);
-  const deferredSourceFilter = useDeferredValue(sourceFilter);
+  const deferredSelectedSources = useDeferredValue(selectedSources);
+  const deferredMaxRank = useDeferredValue(maxRank);
+  const rankFilterEnabled =
+    selectedSources.includes('competitor') || selectedSources.includes('client_website');
+  const canShowCompetitorRank = selectedSources.includes('competitor');
+  const canShowClientWebsiteRank = selectedSources.includes('client_website');
+
+  useEffect(() => {
+    if (!canShowCompetitorRank && showCompetitorRank) {
+      setShowCompetitorRank(false);
+    }
+  }, [canShowCompetitorRank, showCompetitorRank]);
+
+  useEffect(() => {
+    if (!canShowClientWebsiteRank && showClientWebsiteRank) {
+      setShowClientWebsiteRank(false);
+    }
+  }, [canShowClientWebsiteRank, showClientWebsiteRank]);
 
   const filteredRows = useMemo(() => {
     const query = deferredSearch.trim().toLowerCase();
     const minVolume = Number(deferredMinSearchVolume);
+      const maxRankValue = Number(deferredMaxRank);
+      const hasRankFilter =
+        rankFilterEnabled && deferredMaxRank.trim() !== '' && Number.isFinite(maxRankValue);
 
     return rows.filter((row) => {
       const searchMatch =
@@ -150,20 +183,36 @@ export function ExpandedKeywordTable({
       if (!searchMatch) return false;
 
       const volume = typeof row.search_volume === 'number' ? row.search_volume : 0;
-      const volumeMatch = !deferredMinSearchVolume.trim() || volume >= minVolume;
-      if (!volumeMatch) return false;
+      if (deferredMinSearchVolume.trim() && volume < minVolume) {
+        return false;
+      }
 
-      if (deferredSourceFilter === 'all') return true;
-      return (row.source_refs || []).some((source) => {
-        const sourceType = sourceTypeFromRef(source);
-        return sourceType ? sourceType === deferredSourceFilter : false;
-      });
+      if (!matchesSelectedSources(row, deferredSelectedSources)) {
+        return false;
+      }
+
+      if (!hasRankFilter) {
+        return true;
+      }
+
+      const rowSourceTypes = getRowSourceTypes(row);
+      const selectedUnrankedSources = deferredSelectedSources.filter((source) => source === 'seed');
+      if (selectedUnrankedSources.some((source) => rowSourceTypes.includes(source))) {
+        return true;
+      }
+
+      const rankValues = getRankValuesForSelectedSources(row, deferredSelectedSources);
+      return rankValues.some((rankValue) => rankValue <= maxRankValue);
     });
-  }, [rows, deferredSearch, deferredMinSearchVolume, deferredSourceFilter, sourceCatalog]);
+  }, [rows, deferredSearch, deferredMinSearchVolume, deferredSelectedSources, deferredMaxRank, sourceCatalog, rankFilterEnabled]);
 
   useEffect(() => {
     setPage(1);
-  }, [deferredSearch, deferredMinSearchVolume, deferredSourceFilter, rowsPerPage]);
+  }, [deferredSearch, deferredMinSearchVolume, deferredSelectedSources, deferredMaxRank, rowsPerPage]);
+
+  useEffect(() => {
+    onFilteredRowsChange?.(filteredRows);
+  }, [filteredRows, onFilteredRowsChange]);
 
   const totalPages = Math.max(1, Math.ceil(filteredRows.length / rowsPerPage));
   const currentPage = Math.min(page, totalPages);
@@ -175,33 +224,36 @@ export function ExpandedKeywordTable({
   const visibleStart = filteredRows.length ? (currentPage - 1) * rowsPerPage + 1 : 0;
   const visibleEnd = filteredRows.length ? Math.min(currentPage * rowsPerPage, filteredRows.length) : 0;
 
-  const toggleColumn = (column: OptionalColumn) => {
-    startTransition(() => {
-      setVisibleColumns((current) =>
-        current.includes(column) ? current.filter((item) => item !== column) : [...current, column]
-      );
-    });
-  };
-
   const resetFilters = () => {
     startTransition(() => {
       setSearch('');
-      setMinSearchVolume('');
-      setSourceFilter('all');
+      setMinSearchVolume('10');
+      setSelectedSources(ALL_SOURCE_FILTERS);
+      setMaxRank('');
+    });
+  };
+
+  const toggleSource = (source: SourceTypeFilter) => {
+    startTransition(() => {
+      setSelectedSources((current) => {
+        if (current.includes(source)) {
+          const next = current.filter((item) => item !== source);
+          return next.length ? next : [source];
+        }
+        return [...current, source];
+      });
     });
   };
 
   const exportCsv = () => {
-    const headers = ['Keyword', 'Search Volume', ...deferredVisibleColumns.map((column) => COLUMN_LABELS[column])];
-    const csvRows = filteredRows.map((row) =>
-      [
-        escapeCsv(row.keyword),
-        String(row.search_volume),
-        ...deferredVisibleColumns.map((column) => escapeCsv(metricValue(row, column, sourceCatalog))),
-      ].join(',')
-    );
+    const headers = ['Keyword', 'Search Volume'];
+    const csvRows = filteredRows.map((row) => [escapeCsv(row.keyword), String(row.search_volume)].join(','));
     const slug = (projectName || 'expanded-keywords').replace(/\s+/g, '-').toLowerCase();
     downloadCsv(`${slug}-expanded-keywords.csv`, [headers.join(','), ...csvRows].join('\n'));
+  };
+
+  const handleSaveFilter = () => {
+    onSaveFilter?.(filteredRows);
   };
 
   return (
@@ -235,46 +287,78 @@ export function ExpandedKeywordTable({
           className="bg-[#f5f5f7] border border-[#d2d2d7] rounded-lg py-[7px] px-3 text-[13px] text-[#1d1d1f] outline-none w-44 transition-all focus:border-[#0071e3]"
         />
 
-        <select
-          value={sourceFilter}
-          onChange={(e) => {
-            const nextValue = e.target.value as SourceTypeFilter;
-            startTransition(() => {
-              setSourceFilter(nextValue);
-            });
-          }}
-          className="bg-[#f5f5f7] border border-[#d2d2d7] rounded-lg py-[7px] px-3 text-[13px] text-[#1d1d1f] outline-none w-44 transition-all focus:border-[#0071e3]"
-        >
-          {Object.entries(SOURCE_FILTER_LABELS).map(([filter, label]) => (
-            <option key={filter} value={filter}>
-              {label}
-            </option>
-          ))}
-        </select>
-
         <div className="flex flex-wrap items-center gap-2">
-          {Object.entries(COLUMN_LABELS).map(([column, label]) => {
-            const typedColumn = column as OptionalColumn;
-            const active = visibleColumns.includes(typedColumn);
+          {ALL_SOURCE_FILTERS.map((source) => {
+            const active = selectedSources.includes(source);
             return (
               <button
-                key={column}
+                key={source}
                 type="button"
-                onClick={() => toggleColumn(typedColumn)}
-                className={`px-2.5 py-1 rounded-full text-[12px] border transition-colors cursor-pointer ${
+                onClick={() => toggleSource(source)}
+                className={`px-3 py-[7px] rounded-lg text-[13px] border transition-colors cursor-pointer ${
                   active
                     ? 'bg-[#e8f1fb] text-[#0071e3] border-[#0071e3]/30'
                     : 'bg-white text-[#6e6e73] border-[#d2d2d7]'
                 }`}
               >
-                {label}
+                {SOURCE_FILTER_LABELS[source]}
               </button>
             );
           })}
         </div>
 
+        <input
+          type="number"
+          min="1"
+          step="1"
+          placeholder={rankFilterEnabled ? 'Max rank' : 'Select source first'}
+          value={maxRank}
+          onChange={(e) => {
+            const nextValue = e.target.value;
+            startTransition(() => {
+              setMaxRank(nextValue);
+            });
+          }}
+          disabled={!rankFilterEnabled}
+          className="bg-[#f5f5f7] border border-[#d2d2d7] rounded-lg py-[7px] px-3 text-[13px] text-[#1d1d1f] outline-none w-36 transition-all focus:border-[#0071e3] disabled:opacity-50 disabled:cursor-not-allowed"
+        />
+        <span className="text-[11px] text-[#8e8e93]">
+          Rank filter applies to Competitor / Client Website only. Seed stays included if selected.
+        </span>
+        <div className="flex items-center gap-3">
+          <label className={`flex items-center gap-2 text-[12px] ${canShowCompetitorRank ? 'text-[#1d1d1f]' : 'text-[#8e8e93]'}`}>
+            <input
+              type="checkbox"
+              checked={showCompetitorRank}
+              onChange={(e) => setShowCompetitorRank(e.target.checked)}
+              disabled={!canShowCompetitorRank}
+              className="accent-[#0071e3]"
+            />
+            Competitor Rank
+          </label>
+          <label className={`flex items-center gap-2 text-[12px] ${canShowClientWebsiteRank ? 'text-[#1d1d1f]' : 'text-[#8e8e93]'}`}>
+            <input
+              type="checkbox"
+              checked={showClientWebsiteRank}
+              onChange={(e) => setShowClientWebsiteRank(e.target.checked)}
+              disabled={!canShowClientWebsiteRank}
+              className="accent-[#0071e3]"
+            />
+            Client Website Rank
+          </label>
+        </div>
+
         <div className="ml-auto flex items-center gap-2">
           {isPending ? <span className="text-[11px] text-[#8e8e93]">Updating…</span> : null}
+          <span
+            className={`text-[11px] font-medium ${
+              isCurrentFilterSaved ? 'text-[#2f855a]' : 'text-[#b45309]'
+            }`}
+          >
+            {isCurrentFilterSaved
+              ? `Saved filter${typeof savedKeywordCount === 'number' ? ` · ${savedKeywordCount}` : ''}`
+              : 'Unsaved filter changes'}
+          </span>
           <span className="text-[12px] text-[#8e8e93] font-mono">
             {visibleStart}-{visibleEnd} of {filteredRows.length} keywords
           </span>
@@ -301,6 +385,14 @@ export function ExpandedKeywordTable({
           </button>
           <button
             type="button"
+            onClick={handleSaveFilter}
+            disabled={isCurrentFilterSaved}
+            className="inline-flex items-center gap-1.5 px-3 py-[7px] rounded-lg text-[13px] font-medium text-white bg-[#0071e3] border-none hover:opacity-90 transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            Save Filter
+          </button>
+          <button
+            type="button"
             onClick={exportCsv}
             className="inline-flex items-center gap-1.5 px-3 py-[7px] rounded-lg text-[13px] font-medium text-[#6e6e73] bg-transparent border border-[#d2d2d7] hover:bg-[#f5f5f7] transition-all cursor-pointer"
           >
@@ -310,13 +402,12 @@ export function ExpandedKeywordTable({
       </div>
 
       <div className="flex-1 overflow-auto">
-        <table className="w-full border-collapse table-fixed min-w-[840px]">
+        <table className="w-full border-collapse table-fixed min-w-[640px]">
           <colgroup>
-            <col className="w-[34%]" />
-            <col className="w-[120px]" />
-            {deferredVisibleColumns.map((column) => (
-              <col key={column} className="w-[150px]" />
-            ))}
+            <col className={showCompetitorRank || showClientWebsiteRank ? 'w-[58%]' : 'w-[70%]'} />
+            <col className="w-[160px]" />
+            {showCompetitorRank ? <col className="w-[150px]" /> : null}
+            {showClientWebsiteRank ? <col className="w-[170px]" /> : null}
           </colgroup>
           <thead>
             <tr>
@@ -326,24 +417,25 @@ export function ExpandedKeywordTable({
               <th className="bg-white text-[11px] font-semibold text-[#6e6e73] uppercase tracking-[0.6px] py-2.5 px-3.5 text-left border-b border-[#d2d2d7] sticky top-0 z-10">
                 Search Volume
               </th>
-              {deferredVisibleColumns.map((column) => (
-                <th
-                  key={column}
-                  className="bg-white text-[11px] font-semibold text-[#6e6e73] uppercase tracking-[0.6px] py-2.5 px-3.5 text-left border-b border-[#d2d2d7] sticky top-0 z-10"
-                >
-                  {COLUMN_LABELS[column]}
+              {showCompetitorRank ? (
+                <th className="bg-white text-[11px] font-semibold text-[#6e6e73] uppercase tracking-[0.6px] py-2.5 px-3.5 text-left border-b border-[#d2d2d7] sticky top-0 z-10">
+                  Competitor Rank
                 </th>
-              ))}
+              ) : null}
+              {showClientWebsiteRank ? (
+                <th className="bg-white text-[11px] font-semibold text-[#6e6e73] uppercase tracking-[0.6px] py-2.5 px-3.5 text-left border-b border-[#d2d2d7] sticky top-0 z-10">
+                  Client Website Rank
+                </th>
+              ) : null}
             </tr>
           </thead>
           <tbody>
-            {paginatedRows.map((row, index) => (
+            {paginatedRows.map((row) => (
               <TableRow
-                key={`${row.keyword}-${visibleStart + index}`}
+                key={row.keyword}
                 row={row}
-                index={visibleStart + index}
-                visibleColumns={deferredVisibleColumns}
-                sourceCatalog={sourceCatalog}
+                showCompetitorRank={showCompetitorRank}
+                showClientWebsiteRank={showClientWebsiteRank}
               />
             ))}
           </tbody>

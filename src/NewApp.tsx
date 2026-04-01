@@ -8,15 +8,23 @@ import { Sidebar } from './components/Sidebar';
 import { TextArea } from './components/TextArea';
 import {
   createKeywordExpansionJob,
+  createKeywordGroupingJob,
+  filterRelevantKeywords,
   generateSeedKeywords,
   getKeywordExpansionJob,
   getKeywordExpansionResult,
+  getKeywordGroupingJob,
 } from './features/keyword-expansion/api';
 import type {
   KeywordExpansionJob,
+  KeywordExpansionKeywordRow,
+  KeywordGroupingFinalResponse,
+  KeywordGroupingJobDetail,
+  KeywordGroupingPlanResponse,
   KeywordExpansionResult,
 } from './features/keyword-expansion/types';
 import {
+  clearKeywordProjectSnapshot,
   createProject,
   deleteProject,
   listProjects,
@@ -25,7 +33,11 @@ import {
   type SeoProject,
 } from './services/projects';
 import {
+  clearKeywordWorkflowRuns,
   listKeywordSeedRuns,
+  loadLatestKeywordGroupingResult,
+  loadLatestKeywordExpansionResult,
+  saveKeywordGroupingResult,
   type KeywordSeedRunHistoryRow,
 } from './features/keyword-expansion/supabase';
 
@@ -55,11 +67,56 @@ const mockFormData: Record<string, any> = {
   locationName: 'Thailand',
 };
 
-type ActivePanel = 'business' | 'seeds' | 'keywords';
+type ActivePanel = 'business' | 'seeds' | 'keywords' | 'grouping';
 type GeneratingState = null | 'seeds' | 'keywords';
+const GROUPING_PLAN_BATCH_SIZE = 2500;
+
+type GroupingRunProgress = {
+  stage: 'preparing' | 'planning' | 'merging' | 'finalizing';
+  totalBatches: number;
+  completedBatches: number;
+  currentBatch: number;
+  inputKeywordCount: number;
+  message: string;
+};
+
+const GROUPING_JOB_STORAGE_KEY = 'martech-seo-grouping-job-id';
+
+type StoredGroupingJobRef = {
+  jobId: string;
+  projectId: string | null;
+};
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function readStoredGroupingJobRef(): StoredGroupingJobRef | null {
+  const raw = localStorage.getItem(GROUPING_JOB_STORAGE_KEY);
+  if (!raw) return null;
+
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed.jobId === 'string') {
+      return {
+        jobId: parsed.jobId,
+        projectId: typeof parsed.projectId === 'string' ? parsed.projectId : null,
+      };
+    }
+  } catch {
+    // Backward compatibility for older plain-string job ids.
+    return { jobId: raw, projectId: null };
+  }
+
+  return null;
+}
+
+function writeStoredGroupingJobRef(value: StoredGroupingJobRef) {
+  localStorage.setItem(GROUPING_JOB_STORAGE_KEY, JSON.stringify(value));
+}
+
+function clearStoredGroupingJobRef() {
+  localStorage.removeItem(GROUPING_JOB_STORAGE_KEY);
 }
 
 function normalizeDomain(value: string): string {
@@ -75,6 +132,51 @@ function formatTimestamp(value: string) {
   return new Date(value).toLocaleDateString();
 }
 
+function downloadTextFile(filename: string, content: string, mimeType: string) {
+  const blob = new Blob([content], { type: mimeType });
+  const url = window.URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  link.click();
+  window.URL.revokeObjectURL(url);
+}
+
+function sortStep3Keywords(rows: KeywordExpansionKeywordRow[]) {
+  return [...rows]
+    .sort((a, b) => {
+      const aVolume = typeof a.search_volume === 'number' ? a.search_volume : -1;
+      const bVolume = typeof b.search_volume === 'number' ? b.search_volume : -1;
+      if (bVolume !== aVolume) return bVolume - aVolume;
+      return a.keyword.localeCompare(b.keyword);
+    });
+}
+
+function mapGroupingJobToUiProgress(job: KeywordGroupingJobDetail): GroupingRunProgress {
+  const phase = job.progress.phase;
+  return {
+    stage:
+      phase === 'planning'
+        ? 'planning'
+        : phase === 'merging_plan'
+        ? 'merging'
+        : phase === 'final_grouping'
+        ? 'finalizing'
+        : 'preparing',
+    totalBatches:
+      phase === 'planning'
+        ? Math.max(job.progress.total_plan_batches, 1)
+        : Math.max(job.progress.total_final_batches || job.progress.total_plan_batches, 1),
+    completedBatches:
+      phase === 'planning'
+        ? job.progress.completed_plan_batches
+        : job.progress.completed_final_batches || 0,
+    currentBatch: job.progress.current_batch || 0,
+    inputKeywordCount: job.progress.input_keyword_count,
+    message: job.progress.message || 'Processing keyword grouping job',
+  };
+}
+
 export default function NewApp() {
   const [formData, setFormData] = useState<Record<string, any>>({ ...initialFormData });
   const [activePanel, setActivePanel] = useState<ActivePanel>('business');
@@ -85,10 +187,21 @@ export default function NewApp() {
   const [error, setError] = useState('');
   const [job, setJob] = useState<KeywordExpansionJob | null>(null);
   const [expandedResult, setExpandedResult] = useState<KeywordExpansionResult | null>(null);
+  const [filteredKeywordRows, setFilteredKeywordRows] = useState<KeywordExpansionKeywordRow[]>([]);
+  const [savedFilteredKeywordRows, setSavedFilteredKeywordRows] = useState<KeywordExpansionKeywordRow[]>([]);
+  const [savedFilterUpdatedAt, setSavedFilterUpdatedAt] = useState<string | null>(null);
+  const [groupingPlanResult, setGroupingPlanResult] = useState<KeywordGroupingPlanResponse | null>(null);
+  const [groupingPlanLoading, setGroupingPlanLoading] = useState(false);
+  const [groupingPlanError, setGroupingPlanError] = useState('');
+  const [groupingFinalResult, setGroupingFinalResult] = useState<KeywordGroupingFinalResponse | null>(null);
+  const [groupingFinalError, setGroupingFinalError] = useState('');
+  const [groupingRunProgress, setGroupingRunProgress] = useState<GroupingRunProgress | null>(null);
+  const [groupingElapsedSeconds, setGroupingElapsedSeconds] = useState(0);
   const [projectId, setProjectId] = useState<string | null>(null);
   const [seedRunHistory, setSeedRunHistory] = useState<KeywordSeedRunHistoryRow[]>([]);
   const [projects, setProjects] = useState<SeoProject[]>([]);
   const [showProjectList, setShowProjectList] = useState(false);
+  const [projectLoadingName, setProjectLoadingName] = useState<string | null>(null);
   const [projectSearch, setProjectSearch] = useState('');
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
 
@@ -105,12 +218,151 @@ export default function NewApp() {
     [formData.clientWebsites]
   );
   const keywordCount = expandedResult?.keywords.length || 0;
+  const groupingPillarCount = groupingPlanResult
+    ? groupingPlanResult.plan.product_lines.reduce((sum, productLine) => sum + productLine.pillars.length, 0)
+    : 0;
+  const step3Running = groupingPlanLoading;
+  const filteredKeywordSignature = useMemo(
+    () => filteredKeywordRows.map((row) => row.keyword).join('\u0001'),
+    [filteredKeywordRows]
+  );
+  const savedFilteredKeywordSignature = useMemo(
+    () => savedFilteredKeywordRows.map((row) => row.keyword).join('\u0001'),
+    [savedFilteredKeywordRows]
+  );
+  const isCurrentFilterSaved =
+    filteredKeywordSignature === savedFilteredKeywordSignature && filteredKeywordRows.length === savedFilteredKeywordRows.length;
 
   useEffect(() => {
-    if (activePanel === 'keywords' && !expandedResult) {
+    if (!groupingPlanLoading) {
+      setGroupingElapsedSeconds(0);
+      return;
+    }
+
+    const startedAt = Date.now();
+    const interval = window.setInterval(() => {
+      setGroupingElapsedSeconds(Math.floor((Date.now() - startedAt) / 1000));
+    }, 1000);
+
+    return () => {
+      window.clearInterval(interval);
+    };
+  }, [groupingPlanLoading]);
+
+  useEffect(() => {
+    const storedJob = readStoredGroupingJobRef();
+    if (!storedJob || !expandedResult || groupingPlanLoading || !projectId) {
+      return;
+    }
+
+    if (storedJob.projectId && storedJob.projectId !== projectId) {
+      clearStoredGroupingJobRef();
+      return;
+    }
+
+    let active = true;
+
+    const resumeGroupingJob = async () => {
+      try {
+        setGroupingPlanLoading(true);
+        setActivePanel('grouping');
+        let currentJob = await getKeywordGroupingJob(storedJob.jobId);
+        if (!active) return;
+
+        setGroupingRunProgress(mapGroupingJobToUiProgress(currentJob));
+
+        while (currentJob.status === 'queued' || currentJob.status === 'running') {
+          await sleep(1500);
+          currentJob = await getKeywordGroupingJob(storedJob.jobId);
+          if (!active) return;
+          setGroupingRunProgress(mapGroupingJobToUiProgress(currentJob));
+        }
+
+        clearStoredGroupingJobRef();
+
+        if (currentJob.status === 'completed' && currentJob.result && currentJob.plan) {
+          setGroupingPlanResult({
+            success: true,
+            plan: currentJob.plan,
+            raw: currentJob.plan_raw || '',
+            input_keyword_count: currentJob.progress.input_keyword_count,
+            used_keyword_count: currentJob.progress.input_keyword_count,
+            truncated: false,
+            batch_count: currentJob.progress.total_plan_batches,
+          });
+
+          const finalResponse: KeywordGroupingFinalResponse = {
+            success: true,
+            result: currentJob.result,
+            raw: currentJob.raw || '',
+          };
+          setGroupingFinalResult(finalResponse);
+          if (projectId) {
+            await saveKeywordGroupingResult(projectId, finalResponse);
+          }
+          setGroupingPlanError('');
+          setGroupingFinalError('');
+        } else if (currentJob.status === 'failed') {
+          const message = currentJob.error || 'Failed to generate keyword grouping output';
+          setGroupingPlanError(message);
+          setGroupingFinalError(message);
+        }
+      } catch (err) {
+        if (!active) return;
+        const message = err instanceof Error ? err.message : 'Failed to resume keyword grouping job';
+        setGroupingPlanError(message);
+        setGroupingFinalError(message);
+      } finally {
+        if (active) {
+          setGroupingPlanLoading(false);
+          setGroupingRunProgress(null);
+        }
+      }
+    };
+
+    void resumeGroupingJob();
+
+    return () => {
+      active = false;
+    };
+  }, [expandedResult, groupingPlanLoading, projectId]);
+
+  useEffect(() => {
+    if ((activePanel === 'keywords' || activePanel === 'grouping') && !expandedResult) {
       setActivePanel(seedKeywords.length ? 'seeds' : 'business');
     }
   }, [activePanel, expandedResult, seedKeywords.length]);
+
+  useEffect(() => {
+    if (
+      activePanel !== 'grouping' ||
+      !projectId ||
+      !expandedResult ||
+      groupingFinalResult ||
+      groupingPlanLoading ||
+      readStoredGroupingJobRef()
+    ) {
+      return;
+    }
+
+    let active = true;
+
+    const loadGrouping = async () => {
+      try {
+        const latestGroupingResult = await loadLatestKeywordGroupingResult(projectId);
+        if (!active || !latestGroupingResult) return;
+        setGroupingFinalResult(latestGroupingResult);
+      } catch {
+        // Ignore lazy-load failures and keep the UI usable.
+      }
+    };
+
+    void loadGrouping();
+
+    return () => {
+      active = false;
+    };
+  }, [activePanel, expandedResult, groupingFinalResult, groupingPlanLoading, projectId]);
 
   const filteredProjects = useMemo(() => {
     const query = projectSearch.trim().toLowerCase();
@@ -153,8 +405,18 @@ export default function NewApp() {
           | 'active'
           | 'complete',
       },
+      {
+        id: 'grouping',
+        label: 'Grouping Plan',
+        badge: groupingPillarCount || undefined,
+        state: (activePanel === 'grouping'
+          ? 'active'
+          : groupingPlanResult || expandedResult
+          ? 'complete'
+          : 'pending') as 'pending' | 'active' | 'complete',
+      },
     ],
-    [activePanel, seedKeywords.length, keywordCount, expandedResult]
+    [activePanel, seedKeywords.length, keywordCount, expandedResult, groupingPlanResult, groupingPillarCount]
   );
 
   const projectName = formData.businessName || undefined;
@@ -230,6 +492,10 @@ export default function NewApp() {
 
     try {
       const nextProjectId = await ensureProject();
+      if (nextProjectId) {
+        await clearKeywordWorkflowRuns(nextProjectId);
+        await clearKeywordProjectSnapshot(nextProjectId);
+      }
       const created = await createKeywordExpansionJob({
         projectId: nextProjectId || undefined,
         seedKeywords,
@@ -253,9 +519,29 @@ export default function NewApp() {
 
       const completedJob = await getKeywordExpansionResult(created.job_id);
       setJob(completedJob);
-      setExpandedResult(completedJob.result || null);
-      if (nextProjectId && completedJob.result) {
-        await saveKeywordResult(nextProjectId, JSON.stringify(completedJob.result));
+      let nextExpandedResult = completedJob.result || null;
+      if (nextExpandedResult?.keywords?.length) {
+        const relevanceResult = await filterRelevantKeywords(formData, nextExpandedResult.keywords);
+        nextExpandedResult = {
+          ...nextExpandedResult,
+          summary: {
+            ...nextExpandedResult.summary,
+            deduped_keywords: relevanceResult.relevant_keyword_count,
+          },
+          keywords: relevanceResult.relevant_keywords,
+        };
+      }
+
+      setExpandedResult(nextExpandedResult);
+      setFilteredKeywordRows(nextExpandedResult?.keywords || []);
+      setSavedFilteredKeywordRows(nextExpandedResult?.keywords || []);
+      setSavedFilterUpdatedAt(new Date().toISOString());
+      setGroupingPlanResult(null);
+      setGroupingPlanError('');
+      setGroupingFinalResult(null);
+      setGroupingFinalError('');
+      if (nextProjectId && nextExpandedResult) {
+        await saveKeywordResult(nextProjectId, JSON.stringify(nextExpandedResult));
       }
       await refreshSeedRunHistory(nextProjectId);
       setActivePanel('keywords');
@@ -277,6 +563,14 @@ export default function NewApp() {
     setError('');
     setJob(null);
     setExpandedResult(null);
+    setFilteredKeywordRows([]);
+    setSavedFilteredKeywordRows([]);
+    setSavedFilterUpdatedAt(null);
+    setGroupingPlanResult(null);
+    setGroupingPlanError('');
+    setGroupingFinalResult(null);
+    setGroupingFinalError('');
+    setGroupingRunProgress(null);
     setProjectId(null);
     setSeedRunHistory([]);
   };
@@ -294,6 +588,11 @@ export default function NewApp() {
 
     if (stepId === 'keywords' && expandedResult) {
       setActivePanel('keywords');
+      return;
+    }
+
+    if (stepId === 'grouping' && expandedResult) {
+      setActivePanel('grouping');
     }
   };
 
@@ -317,7 +616,14 @@ export default function NewApp() {
     setSeedKeywordsText(nextSeedText);
     setDraftSeedKeywordsText(nextSeedText);
     setExpandedResult(null);
+    setSavedFilteredKeywordRows([]);
+    setSavedFilterUpdatedAt(null);
     setJob(null);
+    setGroupingPlanResult(null);
+    setGroupingPlanError('');
+    setGroupingFinalResult(null);
+    setGroupingFinalError('');
+    setGroupingRunProgress(null);
     setIsEditingSeeds(false);
   };
 
@@ -326,48 +632,168 @@ export default function NewApp() {
     setSeedKeywordsText(nextSeedText);
     setDraftSeedKeywordsText(nextSeedText);
     setExpandedResult(null);
+    setFilteredKeywordRows([]);
+    setSavedFilteredKeywordRows([]);
+    setSavedFilterUpdatedAt(null);
+    setGroupingPlanResult(null);
+    setGroupingPlanError('');
+    setGroupingFinalResult(null);
+    setGroupingFinalError('');
+    setGroupingRunProgress(null);
     setJob(null);
     setIsEditingSeeds(false);
   };
 
-  const handleLoadProject = async (project: SeoProject) => {
-    const fullProject = await loadProject(project.id);
-    setFormData({
-      businessName: fullProject.business_name,
-      websiteUrl: fullProject.website_url || '',
-      businessDescription: fullProject.business_description,
-      seoGoals: fullProject.seo_goals,
-      focusProductLines: fullProject.focus_product_lines || [],
-      mustRankKeywords: fullProject.must_rank_keywords || [],
-      competitorDomains: [],
-      clientWebsites: fullProject.website_url ? [normalizeDomain(fullProject.website_url)] : [],
-      locationName: 'Thailand',
-    });
-    setProjectId(fullProject.id);
-    const seedRuns = await refreshSeedRunHistory(fullProject.id);
-    setShowProjectList(false);
-    setError('');
-
-    const stored = fullProject.keyword_result;
-    if (stored && Array.isArray(stored.keywords) && stored.source_catalog) {
-      setExpandedResult(stored as KeywordExpansionResult);
-      const nextSeedKeywordsText = (stored.source_catalog.s || []).join('\n');
-      setSeedKeywordsText(nextSeedKeywordsText);
-      setDraftSeedKeywordsText(nextSeedKeywordsText);
-      setIsEditingSeeds(false);
-      setFormData((prev: Record<string, any>) => ({
-        ...prev,
-        competitorDomains: stored.source_catalog.c || [],
-        clientWebsites: stored.source_catalog.w || [],
-      }));
-      setActivePanel('keywords');
-    } else {
-      setExpandedResult(null);
-      setSeedKeywordsText('');
-      setDraftSeedKeywordsText('');
-      setIsEditingSeeds(false);
-      setActivePanel(seedRuns.length ? 'seeds' : 'business');
+  const handleGenerateGroupingPlan = async () => {
+    if (!savedFilteredKeywordRows.length) {
+      setGroupingPlanError('No saved keyword set available for keyword grouping.');
+      return;
     }
+
+    setGroupingPlanLoading(true);
+    setGroupingPlanError('');
+    setActivePanel('grouping');
+    setGroupingPlanResult(null);
+    setGroupingFinalResult(null);
+    setGroupingFinalError('');
+
+    try {
+      const limitedKeywords = sortStep3Keywords(savedFilteredKeywordRows);
+      const estimatedPlanBatches = Math.max(Math.ceil(limitedKeywords.length / GROUPING_PLAN_BATCH_SIZE), 1);
+      setGroupingRunProgress({
+        stage: 'preparing',
+        totalBatches: estimatedPlanBatches,
+        completedBatches: 0,
+        currentBatch: estimatedPlanBatches ? 1 : 0,
+        inputKeywordCount: limitedKeywords.length,
+        message: `Preparing ${limitedKeywords.length} keywords for keyword grouping`,
+      });
+
+      const created = await createKeywordGroupingJob(formData, limitedKeywords);
+      writeStoredGroupingJobRef({ jobId: created.job_id, projectId: projectId || null });
+
+      let currentJob = await getKeywordGroupingJob(created.job_id);
+      setGroupingRunProgress(mapGroupingJobToUiProgress(currentJob));
+
+      while (currentJob.status === 'queued' || currentJob.status === 'running') {
+        await sleep(1500);
+        currentJob = await getKeywordGroupingJob(created.job_id);
+        setGroupingRunProgress(mapGroupingJobToUiProgress(currentJob));
+      }
+
+      clearStoredGroupingJobRef();
+
+      if (currentJob.status !== 'completed' || !currentJob.result || !currentJob.plan) {
+        throw new Error(currentJob.error || 'Failed to generate keyword grouping output');
+      }
+
+      setGroupingPlanResult({
+        success: true,
+        plan: currentJob.plan,
+        raw: currentJob.plan_raw || '',
+        input_keyword_count: currentJob.progress.input_keyword_count,
+        used_keyword_count: currentJob.progress.input_keyword_count,
+        truncated: false,
+        batch_count: currentJob.progress.total_plan_batches,
+      });
+
+      const finalResponse: KeywordGroupingFinalResponse = {
+        success: true,
+        result: currentJob.result,
+        raw: currentJob.raw || '',
+      };
+
+      setGroupingFinalResult(finalResponse);
+      if (projectId) {
+        await saveKeywordGroupingResult(projectId, finalResponse);
+      }
+      setGroupingRunProgress(null);
+    } catch (err) {
+      clearStoredGroupingJobRef();
+      const message = err instanceof Error ? err.message : 'Failed to generate keyword grouping output';
+      setGroupingPlanError(message);
+      setGroupingFinalError(message);
+      setGroupingRunProgress(null);
+    } finally {
+      setGroupingPlanLoading(false);
+    }
+  };
+
+  const handleLoadProject = async (project: SeoProject) => {
+    clearStoredGroupingJobRef();
+    setShowProjectList(false);
+    setProjectLoadingName(project.business_name);
+    setError('');
+    setGroupingPlanLoading(false);
+    setGroupingRunProgress(null);
+    try {
+      const [fullProject, latestExpansionResult, seedRuns] = await Promise.all([
+        loadProject(project.id),
+        loadLatestKeywordExpansionResult(project.id).catch(() => null),
+        refreshSeedRunHistory(project.id),
+      ]);
+
+      setFormData({
+        businessName: fullProject.business_name,
+        websiteUrl: fullProject.website_url || '',
+        businessDescription: fullProject.business_description,
+        seoGoals: fullProject.seo_goals,
+        focusProductLines: fullProject.focus_product_lines || [],
+        mustRankKeywords: fullProject.must_rank_keywords || [],
+        competitorDomains: [],
+        clientWebsites: fullProject.website_url ? [normalizeDomain(fullProject.website_url)] : [],
+        locationName: 'Thailand',
+      });
+      setProjectId(fullProject.id);
+
+      const stored = latestExpansionResult || fullProject.keyword_result;
+      if (stored && Array.isArray(stored.keywords) && stored.source_catalog) {
+        setExpandedResult(stored as KeywordExpansionResult);
+        setFilteredKeywordRows(stored.keywords || []);
+        setSavedFilteredKeywordRows(stored.keywords || []);
+        setSavedFilterUpdatedAt(new Date().toISOString());
+        setGroupingPlanResult(null);
+        setGroupingPlanError('');
+        setGroupingFinalResult(null);
+        setGroupingFinalError('');
+        const nextSeedKeywordsText = (stored.source_catalog.s || []).join('\n');
+        setSeedKeywordsText(nextSeedKeywordsText);
+        setDraftSeedKeywordsText(nextSeedKeywordsText);
+        setIsEditingSeeds(false);
+        setFormData((prev: Record<string, any>) => ({
+          ...prev,
+          competitorDomains: stored.source_catalog.c || [],
+          clientWebsites: stored.source_catalog.w || [],
+        }));
+        setActivePanel('keywords');
+      } else {
+        setExpandedResult(null);
+        setFilteredKeywordRows([]);
+        setSavedFilteredKeywordRows([]);
+        setSavedFilterUpdatedAt(null);
+        setGroupingPlanResult(null);
+        setGroupingPlanError('');
+        setGroupingFinalResult(null);
+        setGroupingFinalError('');
+        setSeedKeywordsText('');
+        setDraftSeedKeywordsText('');
+        setIsEditingSeeds(false);
+        setActivePanel(seedRuns.length ? 'seeds' : 'business');
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to load project');
+    } finally {
+      setProjectLoadingName(null);
+    }
+  };
+
+  const handleSaveFilteredKeywords = (rows: KeywordExpansionKeywordRow[]) => {
+    setSavedFilteredKeywordRows(rows);
+    setSavedFilterUpdatedAt(new Date().toISOString());
+    setGroupingPlanResult(null);
+    setGroupingPlanError('');
+    setGroupingFinalResult(null);
+    setGroupingFinalError('');
   };
 
   const handleDeleteProject = async (id: string) => {
@@ -451,6 +877,15 @@ export default function NewApp() {
                 </div>
               ))}
             </div>
+          </div>
+        </div>
+      )}
+
+      {projectLoadingName && (
+        <div className="fixed inset-0 z-[180] flex items-center justify-center bg-black/20 backdrop-blur-[2px]">
+          <div className="rounded-2xl border border-[#d2d2d7] bg-white px-5 py-4 shadow-xl min-w-[280px]">
+            <div className="text-[14px] font-semibold text-[#1d1d1f]">Loading Project</div>
+            <div className="text-[13px] text-[#6e6e73] mt-1">{projectLoadingName}</div>
           </div>
         </div>
       )}
@@ -843,6 +1278,16 @@ export default function NewApp() {
                       Step 2 output with keyword and search volume locked as required columns.
                     </div>
                   </div>
+                  {expandedResult ? (
+                    <button
+                      type="button"
+                      onClick={handleGenerateGroupingPlan}
+                      disabled={step3Running || !savedFilteredKeywordRows.length}
+                      className="inline-flex items-center gap-1.5 px-4 py-[9px] rounded-lg text-[13px] font-medium text-white bg-[#0071e3] border-none cursor-pointer"
+                    >
+                      {step3Running ? 'Generating Keyword Grouping...' : 'Generate Keyword Grouping'}
+                    </button>
+                  ) : null}
                 </div>
               </div>
 
@@ -851,28 +1296,41 @@ export default function NewApp() {
                   <>
                     <div className="grid grid-cols-4 gap-3 mb-4">
                       <div className="rounded-xl border border-[#e8e8ed] bg-[#fafafa] p-4">
-                        <div className="text-[11px] uppercase tracking-[0.6px] text-[#8e8e93]">Keywords</div>
+                        <div className="text-[11px] uppercase tracking-[0.6px] text-[#8e8e93]">Relevant Keywords</div>
                         <div className="text-[22px] font-semibold text-[#1d1d1f] mt-1">
                           {expandedResult.summary.deduped_keywords}
                         </div>
                       </div>
                       <div className="rounded-xl border border-[#e8e8ed] bg-[#fafafa] p-4">
-                        <div className="text-[11px] uppercase tracking-[0.6px] text-[#8e8e93]">Seed Rows</div>
+                        <div className="text-[11px] uppercase tracking-[0.6px] text-[#8e8e93]">Raw Seed Rows</div>
                         <div className="text-[22px] font-semibold text-[#1d1d1f] mt-1">
                           {expandedResult.summary.total_seed_rows}
                         </div>
                       </div>
                       <div className="rounded-xl border border-[#e8e8ed] bg-[#fafafa] p-4">
-                        <div className="text-[11px] uppercase tracking-[0.6px] text-[#8e8e93]">Competitor Rows</div>
+                        <div className="text-[11px] uppercase tracking-[0.6px] text-[#8e8e93]">Raw Competitor Rows</div>
                         <div className="text-[22px] font-semibold text-[#1d1d1f] mt-1">
                           {expandedResult.summary.total_competitor_rows}
                         </div>
                       </div>
                       <div className="rounded-xl border border-[#e8e8ed] bg-[#fafafa] p-4">
-                        <div className="text-[11px] uppercase tracking-[0.6px] text-[#8e8e93]">Client Website Rows</div>
+                        <div className="text-[11px] uppercase tracking-[0.6px] text-[#8e8e93]">Raw Client Website Rows</div>
                         <div className="text-[22px] font-semibold text-[#1d1d1f] mt-1">
                           {expandedResult.summary.total_client_website_rows}
                         </div>
+                      </div>
+                    </div>
+
+                    <div className="mb-4 rounded-xl border border-[#e8e8ed] bg-[#fafafa] px-4 py-3 flex flex-wrap items-center justify-between gap-3 text-[13px]">
+                      <div className="text-[#1d1d1f]">
+                        <span className="font-medium">Saved keyword set:</span>{' '}
+                        <span className="font-mono">{savedFilteredKeywordRows.length}</span> keywords
+                        {savedFilterUpdatedAt ? (
+                          <span className="text-[#8e8e93]"> · saved filter applied</span>
+                        ) : null}
+                      </div>
+                      <div className={`font-medium ${isCurrentFilterSaved ? 'text-[#2f855a]' : 'text-[#b45309]'}`}>
+                        {isCurrentFilterSaved ? 'Step 3 will use this saved set' : 'Save Filter to update Step 3 input'}
                       </div>
                     </div>
 
@@ -880,6 +1338,10 @@ export default function NewApp() {
                       rows={expandedResult.keywords}
                       projectName={formData.businessName}
                       sourceCatalog={expandedResult.source_catalog}
+                      onFilteredRowsChange={setFilteredKeywordRows}
+                      onSaveFilter={handleSaveFilteredKeywords}
+                      isCurrentFilterSaved={isCurrentFilterSaved}
+                      savedKeywordCount={savedFilteredKeywordRows.length}
                     />
                   </>
                 ) : (
@@ -887,6 +1349,196 @@ export default function NewApp() {
                     <div className="text-[15px] font-semibold text-[#1d1d1f]">No expanded keywords yet</div>
                     <div className="text-[13px] text-[#6e6e73] max-w-[300px] leading-relaxed">
                       Generate seeds first, then run keyword expansion to see the Step 2 table here.
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {activePanel === 'grouping' && (
+            <div className="flex flex-col h-full animate-fadeIn">
+              <div className="px-7 pt-5 shrink-0">
+                <div className="flex items-start justify-between gap-4 mb-4">
+                  <div>
+                    <div className="text-[22px] font-semibold text-[#1d1d1f] tracking-[-0.5px]">
+                      Final Grouping Output
+                    </div>
+                    <div className="text-[13px] text-[#6e6e73] mt-1">
+                      Final keyword grouping table for the current filtered keyword set.
+                    </div>
+                  </div>
+                  {expandedResult ? (
+                    <button
+                      type="button"
+                      onClick={handleGenerateGroupingPlan}
+                      disabled={step3Running || !savedFilteredKeywordRows.length}
+                      className="inline-flex items-center gap-1.5 px-4 py-[9px] rounded-lg text-[13px] font-medium text-white bg-[#0071e3] border-none cursor-pointer disabled:opacity-50"
+                    >
+                      {step3Running ? 'Generating Keyword Grouping...' : 'Generate Keyword Grouping'}
+                    </button>
+                  ) : null}
+                </div>
+              </div>
+
+              <div className="flex-1 overflow-auto px-7 pb-7">
+                {expandedResult ? (
+                  <div className="space-y-6">
+                    <div className="grid gap-3 sm:grid-cols-3">
+                      <div className="rounded-xl border border-[#e8e8ed] bg-[#fafafa] p-4">
+                        <div className="text-[11px] uppercase tracking-[0.6px] text-[#8e8e93]">Saved Keywords</div>
+                        <div className="text-[22px] font-semibold text-[#1d1d1f] mt-1">
+                          {savedFilteredKeywordRows.length}
+                        </div>
+                      </div>
+                      <div className="rounded-xl border border-[#e8e8ed] bg-[#fafafa] p-4">
+                        <div className="text-[11px] uppercase tracking-[0.6px] text-[#8e8e93]">Groups</div>
+                        <div className="text-[22px] font-semibold text-[#1d1d1f] mt-1">
+                          {groupingFinalResult ? groupingFinalResult.result.group_count : '-'}
+                        </div>
+                      </div>
+                      <div className="rounded-xl border border-[#e8e8ed] bg-[#fafafa] p-4">
+                        <div className="text-[11px] uppercase tracking-[0.6px] text-[#8e8e93]">Covered Keywords</div>
+                        <div className="text-[22px] font-semibold text-[#1d1d1f] mt-1">
+                          {groupingFinalResult ? groupingFinalResult.result.covered_keyword_count : '-'}
+                        </div>
+                      </div>
+                    </div>
+
+                    {step3Running ? (
+                      <div className="flex items-center justify-center py-8">
+                        <div className="w-full max-w-[440px] text-center">
+                          <span className="text-[56px] mb-5 block" style={{ animation: 'float 3s ease-in-out infinite' }}>
+                            🗂️
+                          </span>
+                          <div className="text-[18px] font-medium text-[#1d1d1f] mb-1.5">Building final grouping...</div>
+                          <div className="text-[13px] text-[#6e6e73] mb-6 leading-relaxed">
+                            Organizing keywords into URL groups and preparing the final table for <strong className="text-[#1d1d1f]">{formData.businessName || 'your project'}</strong>
+                          </div>
+                          <div className="flex items-center gap-3 px-3.5 py-2.5 rounded-xl border bg-[#f0f5ff] border-[rgba(0,122,255,0.3)] text-left">
+                            <div className="text-[18px] w-7 text-center shrink-0 leading-none">🔎</div>
+                            <div className="flex-1 min-w-0">
+                              <div className="text-[13px] font-medium text-[#0071e3]">Researching group structure</div>
+                              <div className="text-[11px] mt-0.5 text-[#007aff]">
+                                {groupingRunProgress?.message || 'Processing full keyword set'}<span className="animate-pulse">...</span>
+                              </div>
+                            </div>
+                            <div className="text-[11px] shrink-0 tabular-nums text-[#007aff]">
+                              {Math.floor(groupingElapsedSeconds / 60)}:{String(groupingElapsedSeconds % 60).padStart(2, '0')}
+                            </div>
+                          </div>
+                          <div className="mt-3 text-[12px] text-[#6e6e73]">
+                            Saved keyword set
+                            {groupingRunProgress ? ` • ${groupingRunProgress.completedBatches}/${groupingRunProgress.totalBatches} planning batches` : ''}
+                          </div>
+                        </div>
+                      </div>
+                    ) : groupingFinalResult ? (
+                      <div className="rounded-2xl border border-[#e8e8ed] bg-white overflow-hidden">
+                            <div className="flex items-center justify-between px-5 py-4 border-b border-[#e8e8ed] bg-[#fafafa]">
+                              <div>
+                                <div className="text-[15px] font-semibold text-[#1d1d1f]">Final Grouping Output</div>
+                                <div className="text-[12px] text-[#6e6e73] mt-1">
+                                  CSV-ready output for the current filtered keyword pool.
+                                </div>
+                              </div>
+                              <div className="flex items-center gap-3">
+                                <div className="text-[12px] text-[#6e6e73]">
+                                  {groupingFinalResult.result.batch_count} batches
+                                </div>
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    downloadTextFile(
+                                      `${(formData.businessName || 'keyword-grouping').toLowerCase().replace(/\s+/g, '-')}-step3.csv`,
+                                      groupingFinalResult.result.csv,
+                                      'text/csv;charset=utf-8;'
+                                    )
+                                  }
+                                  className="inline-flex items-center gap-1.5 px-4 py-[9px] rounded-lg text-[13px] font-medium text-white bg-[#0071e3] border-none cursor-pointer"
+                                >
+                                  Export CSV
+                                </button>
+                              </div>
+                            </div>
+                            <div className="p-5 space-y-4">
+                              <div className="grid gap-3 sm:grid-cols-3">
+                                <div className="rounded-xl border border-[#e8e8ed] bg-[#fafafa] p-4">
+                                  <div className="text-[11px] uppercase tracking-[0.6px] text-[#8e8e93]">Groups</div>
+                                  <div className="text-[22px] font-semibold text-[#1d1d1f] mt-1">
+                                    {groupingFinalResult.result.group_count}
+                                  </div>
+                                </div>
+                                <div className="rounded-xl border border-[#e8e8ed] bg-[#fafafa] p-4">
+                                  <div className="text-[11px] uppercase tracking-[0.6px] text-[#8e8e93]">Covered Keywords</div>
+                                  <div className="text-[22px] font-semibold text-[#1d1d1f] mt-1">
+                                    {groupingFinalResult.result.covered_keyword_count}
+                                  </div>
+                                </div>
+                                <div className="rounded-xl border border-[#e8e8ed] bg-[#fafafa] p-4">
+                                  <div className="text-[11px] uppercase tracking-[0.6px] text-[#8e8e93]">Input Keywords</div>
+                                  <div className="text-[22px] font-semibold text-[#1d1d1f] mt-1">
+                                    {groupingFinalResult.result.input_keyword_count}
+                                  </div>
+                                </div>
+                              </div>
+                              <div className="overflow-x-auto rounded-xl border border-[#e8e8ed] bg-white">
+                                <table className="min-w-full text-left border-collapse">
+                                  <thead className="bg-[#fafafa] border-b border-[#e8e8ed]">
+                                    <tr>
+                                      <th className="px-4 py-3 text-[12px] font-semibold text-[#1d1d1f]">Product Line</th>
+                                      <th className="px-4 py-3 text-[12px] font-semibold text-[#1d1d1f]">Topic Pillar</th>
+                                      <th className="px-4 py-3 text-[12px] font-semibold text-[#1d1d1f]">Intent</th>
+                                      <th className="px-4 py-3 text-[12px] font-semibold text-[#1d1d1f]">Keyword Group</th>
+                                      <th className="px-4 py-3 text-[12px] font-semibold text-[#1d1d1f]">URL Slug</th>
+                                      <th className="px-4 py-3 text-[12px] font-semibold text-[#1d1d1f]">Level 3 Variations</th>
+                                    </tr>
+                                  </thead>
+                                  <tbody>
+                                    {groupingFinalResult.result.groups.map((group, index) => (
+                                      <tr key={`${group.slug}-${index}`} className="border-b border-[#f1f1f4] align-top">
+                                        <td className="px-4 py-3 text-[12px] text-[#1d1d1f]">{group.product_line}</td>
+                                        <td className="px-4 py-3 text-[12px] text-[#1d1d1f]">{group.pillar}</td>
+                                        <td className="px-4 py-3 text-[12px] text-[#1d1d1f]">{group.intent}</td>
+                                        <td className="px-4 py-3 text-[12px] text-[#1d1d1f]">{group.keyword_group}</td>
+                                        <td className="px-4 py-3 text-[12px] text-[#0071e3] font-mono">{group.slug}</td>
+                                        <td className="px-4 py-3 min-w-[420px]">
+                                          <div className="text-[12px] leading-6 text-[#1d1d1f]">
+                                            {group.keywords.map((item, keywordIndex) => (
+                                              <span key={`${group.slug}-${keywordIndex}`} className="mr-2 inline-block">
+                                                <span>{item.keyword}</span>
+                                                <span className="text-[#8e8e93]"> </span>
+                                                <span className="inline-flex items-center rounded-[6px] border border-[#e8e8ed] bg-[#f7f7f9] px-1.5 py-0 text-[10px] font-medium leading-5 text-[#8e8e93]">
+                                                  {typeof item.search_volume === 'number' ? item.search_volume : '-'}
+                                                </span>
+                                              </span>
+                                            ))}
+                                          </div>
+                                        </td>
+                                      </tr>
+                                    ))}
+                                  </tbody>
+                                </table>
+                              </div>
+                            </div>
+                          </div>
+                    ) : (
+                      <div className="rounded-xl border border-dashed border-[#d2d2d7] bg-[#fafafa] p-4 text-[13px] text-[#6e6e73]">
+                        Generate keyword grouping to build the final grouping table from the current filtered keyword set.
+                      </div>
+                    )}
+
+                    {groupingPlanError || groupingFinalError ? (
+                      <div className="bg-[#fff5f5] border border-[#fecaca] text-[#dc2626] rounded-xl p-3 text-[13px]">
+                        {groupingFinalError || groupingPlanError}
+                      </div>
+                    ) : null}
+                  </div>
+                ) : (
+                  <div className="flex flex-col items-center justify-center h-full gap-3 px-6 py-16 text-center">
+                    <div className="text-[15px] font-semibold text-[#1d1d1f]">No expanded keywords yet</div>
+                    <div className="text-[13px] text-[#6e6e73] max-w-[320px] leading-relaxed">
+                      Complete Step 2 first, then use this tab to generate the final keyword grouping output.
                     </div>
                   </div>
                 )}

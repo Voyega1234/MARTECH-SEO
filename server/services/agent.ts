@@ -100,6 +100,11 @@ interface AgentResult {
   error?: { code: string; message: string; retryable: boolean };
 }
 
+type ClaudeJsonSchemaConfig = {
+  name: string;
+  schema: Record<string, unknown>;
+};
+
 // --- Cache MCP tools ---
 let cachedTools: any[] | null = null;
 
@@ -352,11 +357,11 @@ export async function runAgent(
 export async function generateOnly(
   systemPrompt: string,
   userMessage: string,
-  options?: { responseMode?: 'json' | 'text' },
+  options?: { responseMode?: 'json' | 'text'; model?: string; jsonSchema?: ClaudeJsonSchemaConfig },
 ): Promise<AgentResult> {
   const totalStart = Date.now();
   const client = getClient();
-  const outputModel = getOutputModel();
+  const outputModel = options?.model || getOutputModel();
 
   console.log(`\n[Agent-GenerateOnly] Starting with ${outputModel}`);
 
@@ -370,6 +375,31 @@ export async function generateOnly(
     : '\n\nRemember: Output ONLY the final plain-text answer requested. No markdown or explanation.';
   const response = await callClaudeWithRetry(
     async () => {
+      if (responseMode === 'json' && options?.jsonSchema) {
+        fullText = '';
+        const stream = client.messages.stream({
+          model: outputModel,
+          max_tokens: 64000,
+          system: systemPrompt + systemSuffix,
+          messages: [
+            {
+              role: 'user',
+              content: `${userMessage}${userSuffix}`,
+            },
+          ],
+          output_config: {
+            format: {
+              type: 'json_schema',
+              schema: options.jsonSchema.schema,
+            },
+          },
+        } as any);
+
+        return stream.on('text', (text) => {
+          fullText += text;
+        }).finalMessage();
+      }
+
       fullText = '';
       const stream = client.messages.stream({
         model: outputModel,
