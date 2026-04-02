@@ -1,0 +1,7 @@
+node_modules
+dist
+.git
+.DS_Store
+step2_api/__pycache__
+step2_api/.venv
+*.log
