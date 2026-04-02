@@ -302,6 +302,12 @@ export async function loadLatestKeywordExpansionResult(
       deduped_keywords: run.deduped_keywords || keywords.length,
       total_api_calls: run.total_api_calls || 0,
     },
+    metadata: {
+      relevant_keyword_count:
+        typeof (run as any).relevant_keyword_count === 'number'
+          ? (run as any).relevant_keyword_count
+          : keywords.length,
+    },
     source_catalog: sourceCatalog,
     keywords,
   };

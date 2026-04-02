@@ -49,7 +49,6 @@ const initialFormData: Record<string, any> = {
   mustRankKeywords: [],
   focusProductLines: [],
   competitorDomains: [],
-  clientWebsites: [],
   locationName: 'Thailand',
 };
 
@@ -63,7 +62,6 @@ const mockFormData: Record<string, any> = {
   mustRankKeywords: ['ฟิลเลอร์', 'โบท็อกซ์', 'hifu'],
   focusProductLines: ['Fillers', 'Botox'],
   competitorDomains: ['theklinique.com', 'romrawin.com'],
-  clientWebsites: ['aurabangkokclinic.com'],
   locationName: 'Thailand',
 };
 
@@ -152,6 +150,15 @@ function sortStep3Keywords(rows: KeywordExpansionKeywordRow[]) {
     });
 }
 
+function getRelevantKeywordCount(result: KeywordExpansionResult | null): number {
+  if (!result) return 0;
+  const metadataCount = Number(result?.metadata?.relevant_keyword_count);
+  if (Number.isFinite(metadataCount) && metadataCount >= 0) {
+    return metadataCount;
+  }
+  return Array.isArray(result.keywords) ? result.keywords.length : 0;
+}
+
 function mapGroupingJobToUiProgress(job: KeywordGroupingJobDetail): GroupingRunProgress {
   const phase = job.progress.phase;
   return {
@@ -214,10 +221,11 @@ export default function NewApp() {
     [formData.competitorDomains]
   );
   const clientWebsites = useMemo(
-    () => (formData.clientWebsites || []).map((item: string) => normalizeDomain(item)).filter(Boolean),
-    [formData.clientWebsites]
+    () => [normalizeDomain(formData.websiteUrl || '')].filter(Boolean),
+    [formData.websiteUrl]
   );
   const keywordCount = expandedResult?.keywords.length || 0;
+  const relevantKeywordCount = getRelevantKeywordCount(expandedResult);
   const groupingPillarCount = groupingPlanResult
     ? groupingPlanResult.plan.product_lines.reduce((sum, productLine) => sum + productLine.pillars.length, 0)
     : 0;
@@ -521,6 +529,16 @@ export default function NewApp() {
       setJob(completedJob);
       let nextExpandedResult = completedJob.result || null;
       if (nextExpandedResult?.keywords?.length) {
+        setJob({
+          ...completedJob,
+          status: 'running',
+          progress: {
+            ...completedJob.progress,
+            phase: 'relevance_filter',
+            message: `Checking relevance for ${nextExpandedResult.keywords.length} keywords with Claude Haiku 4.5`,
+            current_item: null,
+          },
+        });
         const relevanceResult = await filterRelevantKeywords(formData, nextExpandedResult.keywords);
         nextExpandedResult = {
           ...nextExpandedResult,
@@ -531,6 +549,18 @@ export default function NewApp() {
           keywords: relevanceResult.relevant_keywords,
         };
       }
+
+      setJob({
+        ...completedJob,
+        result: nextExpandedResult || completedJob.result,
+        progress: {
+          ...completedJob.progress,
+          phase: 'completed',
+          message: nextExpandedResult?.keywords?.length
+            ? `Keyword expansion complete. Relevant keyword set prepared (${nextExpandedResult.keywords.length} keywords).`
+            : completedJob.progress.message,
+        },
+      });
 
       setExpandedResult(nextExpandedResult);
       setFilteredKeywordRows(nextExpandedResult?.keywords || []);
@@ -741,12 +771,15 @@ export default function NewApp() {
         focusProductLines: fullProject.focus_product_lines || [],
         mustRankKeywords: fullProject.must_rank_keywords || [],
         competitorDomains: [],
-        clientWebsites: fullProject.website_url ? [normalizeDomain(fullProject.website_url)] : [],
         locationName: 'Thailand',
       });
       setProjectId(fullProject.id);
 
-      const stored = latestExpansionResult || fullProject.keyword_result;
+      const stored =
+        (fullProject.keyword_result && Array.isArray(fullProject.keyword_result.keywords) && fullProject.keyword_result.source_catalog
+          ? fullProject.keyword_result
+          : null) ||
+        latestExpansionResult;
       if (stored && Array.isArray(stored.keywords) && stored.source_catalog) {
         setExpandedResult(stored as KeywordExpansionResult);
         setFilteredKeywordRows(stored.keywords || []);
@@ -763,7 +796,6 @@ export default function NewApp() {
         setFormData((prev: Record<string, any>) => ({
           ...prev,
           competitorDomains: stored.source_catalog.c || [],
-          clientWebsites: stored.source_catalog.w || [],
         }));
         setActivePanel('keywords');
       } else {
@@ -942,6 +974,9 @@ export default function NewApp() {
                         value={formData.websiteUrl}
                         onChange={(e) => setFormData({ ...formData, websiteUrl: e.target.value })}
                       />
+                      <div className="text-[11px] text-[#8e8e93]">
+                        Used as the client website source for keyword expansion.
+                      </div>
                     </div>
 
                     <div className="col-span-2 flex flex-col gap-1.5">
@@ -992,15 +1027,6 @@ export default function NewApp() {
                         placeholder="Add a competitor domain and press Enter"
                         items={formData.competitorDomains}
                         onChange={(items) => setFormData({ ...formData, competitorDomains: items })}
-                      />
-                    </div>
-
-                    <div className="col-span-2 flex flex-col gap-1.5">
-                      <label className="text-[12px] font-semibold text-[#1d1d1f]">Client Websites</label>
-                      <DynamicList
-                        placeholder="Add a client website and press Enter"
-                        items={formData.clientWebsites}
-                        onChange={(items) => setFormData({ ...formData, clientWebsites: items })}
                       />
                     </div>
 
@@ -1298,7 +1324,7 @@ export default function NewApp() {
                       <div className="rounded-xl border border-[#e8e8ed] bg-[#fafafa] p-4">
                         <div className="text-[11px] uppercase tracking-[0.6px] text-[#8e8e93]">Relevant Keywords</div>
                         <div className="text-[22px] font-semibold text-[#1d1d1f] mt-1">
-                          {expandedResult.summary.deduped_keywords}
+                          {relevantKeywordCount}
                         </div>
                       </div>
                       <div className="rounded-xl border border-[#e8e8ed] bg-[#fafafa] p-4">

@@ -72,6 +72,9 @@ export interface KeywordExpansionKeywordRow {
 
 export interface KeywordExpansionResult {
   summary: KeywordExpansionSummary;
+  metadata?: {
+    relevant_keyword_count?: number;
+  };
   source_catalog: {
     s: string[];
     c: string[];

@@ -41,6 +41,7 @@ export async function createProject(formData: Record<string, any>): Promise<SeoP
 export async function saveKeywordResult(projectId: string, keywordResult: string): Promise<void> {
   let parsed: any = null;
   let groupCount = 0;
+  let relevantKeywordCount: number | null = null;
 
   try {
     const jsonMatch = keywordResult.match(/\{[\s\S]*\}/);
@@ -48,6 +49,14 @@ export async function saveKeywordResult(projectId: string, keywordResult: string
       parsed = JSON.parse(jsonMatch[0]);
       if (Array.isArray(parsed.keywords)) {
         groupCount = parsed.keywords.length;
+        relevantKeywordCount = parsed.keywords.length;
+        parsed = {
+          ...parsed,
+          metadata: {
+            ...(parsed.metadata || {}),
+            relevant_keyword_count: relevantKeywordCount,
+          },
+        };
       } else {
         for (const pl of parsed.product_lines || []) {
           for (const tp of pl.topic_pillars || []) {

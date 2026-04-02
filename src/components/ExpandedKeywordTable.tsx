@@ -71,22 +71,6 @@ function matchesSelectedSources(row: KeywordExpansionKeywordRow, selectedSources
   return rowSourceTypes.some((source) => selectedSources.includes(source));
 }
 
-function getRankValuesForSelectedSources(
-  row: KeywordExpansionKeywordRow,
-  selectedSources: SourceTypeFilter[]
-): number[] {
-  const ranks: number[] = [];
-
-  if (selectedSources.includes('competitor') && typeof row.best_competitor_rank_group === 'number') {
-    ranks.push(row.best_competitor_rank_group);
-  }
-  if (selectedSources.includes('client_website') && typeof row.best_client_website_rank_group === 'number') {
-    ranks.push(row.best_client_website_rank_group);
-  }
-
-  return ranks;
-}
-
 const TableRow = memo(function TableRow({
   row,
   showCompetitorRank,
@@ -136,9 +120,10 @@ export function ExpandedKeywordTable({
   savedKeywordCount?: number;
 }) {
   const [search, setSearch] = useState('');
-  const [minSearchVolume, setMinSearchVolume] = useState('10');
+  const [minSearchVolume, setMinSearchVolume] = useState('0');
   const [selectedSources, setSelectedSources] = useState<SourceTypeFilter[]>(ALL_SOURCE_FILTERS);
-  const [maxRank, setMaxRank] = useState('');
+  const [competitorMaxRank, setCompetitorMaxRank] = useState('');
+  const [clientWebsiteMaxRank, setClientWebsiteMaxRank] = useState('');
   const [showCompetitorRank, setShowCompetitorRank] = useState(false);
   const [showClientWebsiteRank, setShowClientWebsiteRank] = useState(false);
   const [rowsPerPage, setRowsPerPage] = useState(100);
@@ -147,11 +132,10 @@ export function ExpandedKeywordTable({
   const deferredSearch = useDeferredValue(search);
   const deferredMinSearchVolume = useDeferredValue(minSearchVolume);
   const deferredSelectedSources = useDeferredValue(selectedSources);
-  const deferredMaxRank = useDeferredValue(maxRank);
-  const rankFilterEnabled =
-    selectedSources.includes('competitor') || selectedSources.includes('client_website');
   const canShowCompetitorRank = selectedSources.includes('competitor');
   const canShowClientWebsiteRank = selectedSources.includes('client_website');
+  const deferredCompetitorMaxRank = useDeferredValue(competitorMaxRank);
+  const deferredClientWebsiteMaxRank = useDeferredValue(clientWebsiteMaxRank);
 
   useEffect(() => {
     if (!canShowCompetitorRank && showCompetitorRank) {
@@ -168,9 +152,16 @@ export function ExpandedKeywordTable({
   const filteredRows = useMemo(() => {
     const query = deferredSearch.trim().toLowerCase();
     const minVolume = Number(deferredMinSearchVolume);
-      const maxRankValue = Number(deferredMaxRank);
-      const hasRankFilter =
-        rankFilterEnabled && deferredMaxRank.trim() !== '' && Number.isFinite(maxRankValue);
+    const competitorMaxRankValue = Number(deferredCompetitorMaxRank);
+    const clientWebsiteMaxRankValue = Number(deferredClientWebsiteMaxRank);
+    const hasCompetitorRankFilter =
+      deferredSelectedSources.includes('competitor') &&
+      deferredCompetitorMaxRank.trim() !== '' &&
+      Number.isFinite(competitorMaxRankValue);
+    const hasClientWebsiteRankFilter =
+      deferredSelectedSources.includes('client_website') &&
+      deferredClientWebsiteMaxRank.trim() !== '' &&
+      Number.isFinite(clientWebsiteMaxRankValue);
 
     return rows.filter((row) => {
       const searchMatch =
@@ -191,24 +182,55 @@ export function ExpandedKeywordTable({
         return false;
       }
 
-      if (!hasRankFilter) {
-        return true;
-      }
-
       const rowSourceTypes = getRowSourceTypes(row);
-      const selectedUnrankedSources = deferredSelectedSources.filter((source) => source === 'seed');
-      if (selectedUnrankedSources.some((source) => rowSourceTypes.includes(source))) {
-        return true;
+      let matches = false;
+
+      if (deferredSelectedSources.includes('seed') && rowSourceTypes.includes('seed')) {
+        matches = true;
       }
 
-      const rankValues = getRankValuesForSelectedSources(row, deferredSelectedSources);
-      return rankValues.some((rankValue) => rankValue <= maxRankValue);
+      if (deferredSelectedSources.includes('competitor') && rowSourceTypes.includes('competitor')) {
+        const competitorPass =
+          !hasCompetitorRankFilter ||
+          (typeof row.best_competitor_rank_group === 'number' &&
+            row.best_competitor_rank_group <= competitorMaxRankValue);
+        if (competitorPass) {
+          matches = true;
+        }
+      }
+
+      if (deferredSelectedSources.includes('client_website') && rowSourceTypes.includes('client_website')) {
+        const clientWebsitePass =
+          !hasClientWebsiteRankFilter ||
+          (typeof row.best_client_website_rank_group === 'number' &&
+            row.best_client_website_rank_group <= clientWebsiteMaxRankValue);
+        if (clientWebsitePass) {
+          matches = true;
+        }
+      }
+
+      return matches;
     });
-  }, [rows, deferredSearch, deferredMinSearchVolume, deferredSelectedSources, deferredMaxRank, sourceCatalog, rankFilterEnabled]);
+  }, [
+    rows,
+    deferredSearch,
+    deferredMinSearchVolume,
+    deferredSelectedSources,
+    deferredCompetitorMaxRank,
+    deferredClientWebsiteMaxRank,
+    sourceCatalog,
+  ]);
 
   useEffect(() => {
     setPage(1);
-  }, [deferredSearch, deferredMinSearchVolume, deferredSelectedSources, deferredMaxRank, rowsPerPage]);
+  }, [
+    deferredSearch,
+    deferredMinSearchVolume,
+    deferredSelectedSources,
+    deferredCompetitorMaxRank,
+    deferredClientWebsiteMaxRank,
+    rowsPerPage,
+  ]);
 
   useEffect(() => {
     onFilteredRowsChange?.(filteredRows);
@@ -227,9 +249,10 @@ export function ExpandedKeywordTable({
   const resetFilters = () => {
     startTransition(() => {
       setSearch('');
-      setMinSearchVolume('10');
+      setMinSearchVolume('0');
       setSelectedSources(ALL_SOURCE_FILTERS);
-      setMaxRank('');
+      setCompetitorMaxRank('');
+      setClientWebsiteMaxRank('');
     });
   };
 
@@ -311,19 +334,34 @@ export function ExpandedKeywordTable({
           type="number"
           min="1"
           step="1"
-          placeholder={rankFilterEnabled ? 'Max rank' : 'Select source first'}
-          value={maxRank}
+          placeholder={canShowCompetitorRank ? 'Competitor max rank' : 'Select Competitor'}
+          value={competitorMaxRank}
           onChange={(e) => {
             const nextValue = e.target.value;
             startTransition(() => {
-              setMaxRank(nextValue);
+              setCompetitorMaxRank(nextValue);
             });
           }}
-          disabled={!rankFilterEnabled}
-          className="bg-[#f5f5f7] border border-[#d2d2d7] rounded-lg py-[7px] px-3 text-[13px] text-[#1d1d1f] outline-none w-36 transition-all focus:border-[#0071e3] disabled:opacity-50 disabled:cursor-not-allowed"
+          disabled={!canShowCompetitorRank}
+          className="bg-[#f5f5f7] border border-[#d2d2d7] rounded-lg py-[7px] px-3 text-[13px] text-[#1d1d1f] outline-none w-44 transition-all focus:border-[#0071e3] disabled:opacity-50 disabled:cursor-not-allowed"
+        />
+        <input
+          type="number"
+          min="1"
+          step="1"
+          placeholder={canShowClientWebsiteRank ? 'Client web max rank' : 'Select Client Website'}
+          value={clientWebsiteMaxRank}
+          onChange={(e) => {
+            const nextValue = e.target.value;
+            startTransition(() => {
+              setClientWebsiteMaxRank(nextValue);
+            });
+          }}
+          disabled={!canShowClientWebsiteRank}
+          className="bg-[#f5f5f7] border border-[#d2d2d7] rounded-lg py-[7px] px-3 text-[13px] text-[#1d1d1f] outline-none w-44 transition-all focus:border-[#0071e3] disabled:opacity-50 disabled:cursor-not-allowed"
         />
         <span className="text-[11px] text-[#8e8e93]">
-          Rank filter applies to Competitor / Client Website only. Seed stays included if selected.
+          Seed is unaffected by rank filters. Competitor and Client Website are filtered separately.
         </span>
         <div className="flex items-center gap-3">
           <label className={`flex items-center gap-2 text-[12px] ${canShowCompetitorRank ? 'text-[#1d1d1f]' : 'text-[#8e8e93]'}`}>
