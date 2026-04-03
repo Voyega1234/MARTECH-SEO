@@ -8,12 +8,25 @@ import {
   getKeywordGroupingPlanPrompt,
   getKeywordGroupingRepairPrompt,
   getKeywordRelevanceFilterPrompt,
+  getPaaBlogIdeasPrompt,
+  getPaaBlogSeedSelectionPrompt,
   getSeedKeywordPrompt,
 } from '../config/prompts.ts';
+import { fetchGoogleOrganicSerpFeatures } from '../services/dfsSerp.ts';
 import { verifyDashVolumes } from '../services/volumeVerifier.ts';
 import { parseAndValidateSeedOutput } from '../../shared/seedKeywords.ts';
 import type { KeywordGroupingPlan } from '../../shared/keywordGroupingPlan.ts';
 import { mergeKeywordGroupingPlans, parseAndValidateKeywordGroupingPlanOutput } from '../../shared/keywordGroupingPlan.ts';
+import {
+  buildKeywordMapReference,
+  dedupeCollectedEntries,
+  filterCannibalizingIdeas,
+  normalizePaaText,
+  type PaaCollectedEntry,
+  type PaaIdeaRow,
+  type PaaKeywordMap,
+  type PaaSeedPlan,
+} from '../../shared/paaBlog.ts';
 import {
   applyKeywordGroupingMerges,
   buildFallbackKeywordGroupingBatchResult,
@@ -31,6 +44,8 @@ import {
   getKeywordGroupingMergeReviewJsonSchema,
   getKeywordGroupingPlanJsonSchema,
   getKeywordRelevanceFilterJsonSchema,
+  getPaaBlogIdeasJsonSchema,
+  getPaaSeedSelectionJsonSchema,
 } from '../../shared/claudeStructuredSchemas.ts';
 
 export const keywordRouter = Router();
@@ -75,6 +90,41 @@ type StoredGroupingJob = {
 
 const groupingJobs = new Map<string, StoredGroupingJob>();
 
+type PaaBlogJobStatus = 'queued' | 'running' | 'completed' | 'failed';
+
+type PaaBlogJobProgress = {
+  phase: 'queued' | 'seed_selection' | 'collecting_thai' | 'collecting_english' | 'finalizing' | 'completed' | 'failed';
+  total_serp_calls: number;
+  completed_serp_calls: number;
+  current_seed: string | null;
+  message: string | null;
+};
+
+type PaaBlogJobResult = {
+  seed_plan: PaaSeedPlan;
+  collected_entries: PaaCollectedEntry[];
+  ideas: PaaIdeaRow[];
+  collected_entry_count: number;
+  idea_count: number;
+  keyword_map_group_count: number;
+};
+
+type StoredPaaBlogJob = {
+  job_id: string;
+  formData: Record<string, any>;
+  keywordMap: PaaKeywordMap | null;
+  status: PaaBlogJobStatus;
+  created_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+  progress: PaaBlogJobProgress;
+  error: string | null;
+  result: PaaBlogJobResult | null;
+  raw: string | null;
+};
+
+const paaBlogJobs = new Map<string, StoredPaaBlogJob>();
+
 // Build user message from form data
 function buildKeywordUserMessage(formData: Record<string, any>): string {
   const parts: string[] = [];
@@ -116,6 +166,89 @@ function validateFormData(formData: any): string | null {
   if (!formData.businessDescription?.trim()) return 'Business description is required';
   if (!formData.seoGoals?.trim()) return 'SEO goals are required';
   return null;
+}
+
+function buildPaaSeedSelectionUserMessage(
+  formData: Record<string, any>,
+  keywordMap: PaaKeywordMap | null
+): string {
+  const parts: string[] = [];
+  parts.push(`Business Name: ${formData.businessName || 'N/A'}`);
+  parts.push(`Website URL: ${formData.websiteUrl || 'N/A'}`);
+  parts.push(`Business Description & Core Offerings: ${formData.businessDescription || 'N/A'}`);
+  parts.push(`SEO Goals & Conversion Action: ${formData.seoGoals || 'N/A'}`);
+  if (formData.mustRankKeywords?.length) {
+    parts.push(`Priority Keywords:\n${formData.mustRankKeywords.map((k: string) => `- ${k}`).join('\n')}`);
+  }
+  if (formData.focusProductLines?.length) {
+    parts.push(`Focus Product Lines:\n${formData.focusProductLines.map((p: string) => `- ${p}`).join('\n')}`);
+  }
+  parts.push(`Keyword Map Summary:\n${buildKeywordMapReference(keywordMap)}`);
+  return parts.join('\n\n');
+}
+
+function parsePaaSeedPlan(raw: string): PaaSeedPlan {
+  const parsed = JSON.parse(extractJsonObject(raw));
+  const thaiSeeds: string[] = Array.isArray(parsed?.thai_seeds)
+    ? parsed.thai_seeds.map((item: unknown) => normalizePaaText(String(item))).filter(Boolean)
+    : [];
+  const englishSeeds: string[] = Array.isArray(parsed?.english_seeds)
+    ? parsed.english_seeds.map((item: unknown) => normalizePaaText(String(item))).filter(Boolean)
+    : [];
+
+  const uniqueThai: string[] = [...new Set(thaiSeeds)];
+  const uniqueEnglish: string[] = [...new Set(englishSeeds)];
+
+  if (uniqueThai.length < 10 || uniqueEnglish.length < 10) {
+    throw new Error('PAA seed selection did not return 10 Thai and 10 English seeds.');
+  }
+
+  return {
+    thai_seeds: uniqueThai.slice(0, 10),
+    english_seeds: uniqueEnglish.slice(0, 10),
+  };
+}
+
+function buildPaaIdeasUserMessage(
+  formData: Record<string, any>,
+  keywordMap: PaaKeywordMap | null,
+  seedPlan: PaaSeedPlan,
+  collectedEntries: PaaCollectedEntry[]
+): string {
+  const parts: string[] = [];
+  parts.push(`Business Name: ${formData.businessName || 'N/A'}`);
+  parts.push(`Website URL: ${formData.websiteUrl || 'N/A'}`);
+  parts.push(`Business Description & Core Offerings: ${formData.businessDescription || 'N/A'}`);
+  parts.push(`SEO Goals & Conversion Action: ${formData.seoGoals || 'N/A'}`);
+  if (formData.mustRankKeywords?.length) {
+    parts.push(`Priority Keywords:\n${formData.mustRankKeywords.map((k: string) => `- ${k}`).join('\n')}`);
+  }
+  if (formData.focusProductLines?.length) {
+    parts.push(`Focus Product Lines:\n${formData.focusProductLines.map((p: string) => `- ${p}`).join('\n')}`);
+  }
+  parts.push(`Thai Seeds:\n${seedPlan.thai_seeds.map((seed) => `- ${seed}`).join('\n')}`);
+  parts.push(`English Seeds:\n${seedPlan.english_seeds.map((seed) => `- ${seed}`).join('\n')}`);
+  parts.push(`Keyword Map Summary:\n${buildKeywordMapReference(keywordMap)}`);
+  parts.push(
+    `Collected SERP Entries (${collectedEntries.length}):\n${collectedEntries
+      .map((entry) => `- [${entry.source}] [${entry.seed_language}] [${entry.source_seed}] ${entry.query}`)
+      .join('\n')}`
+  );
+  return parts.join('\n\n');
+}
+
+function parsePaaIdeaRows(raw: string): PaaIdeaRow[] {
+  const parsed = JSON.parse(extractJsonObject(raw));
+  const ideas = Array.isArray(parsed?.ideas) ? parsed.ideas : [];
+
+  return ideas
+    .map((idea: any) => ({
+      blog_title: normalizePaaText(String(idea?.blog_title || '')),
+      source: idea?.source === 'PAA' ? 'PAA' : 'Related Search',
+      source_seed: normalizePaaText(String(idea?.source_seed || '')),
+      programmatic_variables: normalizePaaText(String(idea?.programmatic_variables || '')),
+    }))
+    .filter((idea: PaaIdeaRow) => idea.blog_title && idea.source_seed);
 }
 
 const MAX_GROUPING_PLAN_KEYWORDS_PER_BATCH = 2500;
@@ -514,6 +647,117 @@ function serializeGroupingJob(job: StoredGroupingJob) {
   };
 }
 
+function serializePaaBlogJob(job: StoredPaaBlogJob) {
+  return {
+    job_id: job.job_id,
+    status: job.status,
+    created_at: job.created_at,
+    started_at: job.started_at,
+    completed_at: job.completed_at,
+    progress: job.progress,
+    error: job.error,
+    result: job.result || undefined,
+    raw: job.raw,
+  };
+}
+
+async function processPaaBlogJob(jobId: string) {
+  const job = paaBlogJobs.get(jobId);
+  if (!job) return;
+
+  try {
+    job.status = 'running';
+    job.started_at = nowIso();
+    job.progress.phase = 'seed_selection';
+    job.progress.message = 'Selecting Thai and English SERP seeds';
+
+    const seedPrompt = getPaaBlogSeedSelectionPrompt();
+    const seedUserMessage = buildPaaSeedSelectionUserMessage(job.formData, job.keywordMap);
+    const seedResponse = await generateOnly(seedPrompt, seedUserMessage, {
+      jsonSchema: getPaaSeedSelectionJsonSchema(),
+    });
+    const seedPlan = parsePaaSeedPlan(seedResponse.result);
+
+    const rawParts = [`Seed Plan\n${seedResponse.result}`];
+    const collectedEntries: PaaCollectedEntry[] = [];
+    const allSeeds = [
+      ...seedPlan.thai_seeds.map((seed) => ({ keyword: seed, language: 'th' as const })),
+      ...seedPlan.english_seeds.map((seed) => ({ keyword: seed, language: 'en' as const })),
+    ];
+
+    job.progress.total_serp_calls = allSeeds.length;
+
+    for (let index = 0; index < allSeeds.length; index += 1) {
+      const seed = allSeeds[index];
+      job.progress.phase = seed.language === 'th' ? 'collecting_thai' : 'collecting_english';
+      job.progress.current_seed = seed.keyword;
+      job.progress.message = `Collecting ${seed.language === 'th' ? 'Thai' : 'English'} SERP features for "${seed.keyword}"`;
+
+      const features = await fetchGoogleOrganicSerpFeatures(seed.keyword, seed.language);
+      rawParts.push(
+        `Seed ${index + 1}/${allSeeds.length}: ${seed.keyword}\nPAA: ${features.paaTitles.join(' | ')}\nRelated: ${features.relatedSearches.join(' | ')}`
+      );
+
+      for (const title of features.paaTitles) {
+        collectedEntries.push({
+          query: title,
+          source: 'PAA',
+          source_seed: seed.keyword,
+          seed_language: seed.language,
+        });
+      }
+
+      for (const query of features.relatedSearches) {
+        collectedEntries.push({
+          query,
+          source: 'Related Search',
+          source_seed: seed.keyword,
+          seed_language: seed.language,
+        });
+      }
+
+      job.progress.completed_serp_calls = index + 1;
+    }
+
+    const normalizedEntries = dedupeCollectedEntries(collectedEntries);
+    job.progress.phase = 'finalizing';
+    job.progress.current_seed = null;
+    job.progress.message = 'Translating, deduplicating, and building final Thai blog ideas';
+
+    const ideasPrompt = getPaaBlogIdeasPrompt();
+    const ideasUserMessage = buildPaaIdeasUserMessage(job.formData, job.keywordMap, seedPlan, normalizedEntries);
+    const ideasResponse = await generateOnly(ideasPrompt, ideasUserMessage, {
+      jsonSchema: getPaaBlogIdeasJsonSchema(),
+    });
+    rawParts.push(`Final Ideas\n${ideasResponse.result}`);
+
+    const rawIdeas = parsePaaIdeaRows(ideasResponse.result);
+    const filteredIdeas = filterCannibalizingIdeas(rawIdeas, job.keywordMap);
+
+    job.result = {
+      seed_plan: seedPlan,
+      collected_entries: normalizedEntries,
+      ideas: filteredIdeas,
+      collected_entry_count: normalizedEntries.length,
+      idea_count: filteredIdeas.length,
+      keyword_map_group_count: job.keywordMap?.groups.length || 0,
+    };
+    job.raw = rawParts.join('\n\n');
+    job.status = 'completed';
+    job.completed_at = nowIso();
+    job.progress.phase = 'completed';
+    job.progress.message = 'PAA Blog ideation complete';
+  } catch (err) {
+    console.error('PAA Blog job error:', err);
+    job.status = 'failed';
+    job.completed_at = nowIso();
+    job.error = errorResponse(err).error;
+    job.progress.phase = 'failed';
+    job.progress.current_seed = null;
+    job.progress.message = 'PAA Blog ideation failed';
+  }
+}
+
 async function processGroupingJob(jobId: string) {
   const job = groupingJobs.get(jobId);
   if (!job) return;
@@ -849,6 +1093,82 @@ keywordRouter.post('/relevance-filter', async (req: Request, res: Response) => {
       : 500;
     res.status(status).json(errorResponse(err));
   }
+});
+
+keywordRouter.post('/paa-blog-jobs', async (req: Request, res: Response) => {
+  try {
+    const { formData, keywordMap } = req.body;
+    const validationError = validateFormData(formData);
+    if (validationError) {
+      res.status(400).json({ error: validationError, code: 'validation' });
+      return;
+    }
+
+    if (!keywordMap || !Array.isArray(keywordMap.groups) || !keywordMap.groups.length) {
+      res.status(400).json({ error: 'latest keyword grouping output is required', code: 'validation' });
+      return;
+    }
+
+    const jobId = randomUUID();
+    const job: StoredPaaBlogJob = {
+      job_id: jobId,
+      formData,
+      keywordMap: {
+        groups: keywordMap.groups.map((group: any) => ({
+          product_line: String(group?.product_line || ''),
+          pillar: String(group?.pillar || ''),
+          keyword_group: String(group?.keyword_group || ''),
+          keywords: Array.isArray(group?.keywords)
+            ? group.keywords.map((keyword: any) => ({
+                keyword: String(keyword?.keyword || ''),
+                search_volume:
+                  typeof keyword?.search_volume === 'number' || keyword?.search_volume === '-'
+                    ? keyword.search_volume
+                    : '-',
+              }))
+            : [],
+        })),
+      },
+      status: 'queued',
+      created_at: nowIso(),
+      started_at: null,
+      completed_at: null,
+      progress: {
+        phase: 'queued',
+        total_serp_calls: 20,
+        completed_serp_calls: 0,
+        current_seed: null,
+        message: 'Waiting to start',
+      },
+      error: null,
+      result: null,
+      raw: null,
+    };
+
+    paaBlogJobs.set(jobId, job);
+    void processPaaBlogJob(jobId);
+
+    res.json({
+      job_id: jobId,
+      status: job.status,
+    });
+  } catch (err) {
+    console.error('PAA Blog job create error:', err);
+    const status = (err as any).code === 'auth_error' ? 401
+      : (err as any).code === 'rate_limit' ? 429
+      : 500;
+    res.status(status).json(errorResponse(err));
+  }
+});
+
+keywordRouter.get('/paa-blog-jobs/:jobId', async (req: Request, res: Response) => {
+  const job = paaBlogJobs.get(req.params.jobId);
+  if (!job) {
+    res.status(404).json({ error: 'PAA Blog job not found', code: 'not_found' });
+    return;
+  }
+
+  res.json(serializePaaBlogJob(job));
 });
 
 keywordRouter.get('/grouping-jobs/:jobId', async (req: Request, res: Response) => {

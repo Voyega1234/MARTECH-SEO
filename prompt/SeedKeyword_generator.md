@@ -38,7 +38,9 @@ Output format:
 - No numbering.
 - No categories.
 - No markdown.
-- Aim for 15-30 seeds total, but fewer is fine if the niche has fewer distinct clusters.
+- Aim for 15-20 seeds total.
+- Prefer staying within 15-20 even for broad businesses.
+- If the niche has fewer truly distinct clusters, returning slightly fewer is acceptable.
 
 CRITICAL:
 - Output ONLY the comma-separated seed list.

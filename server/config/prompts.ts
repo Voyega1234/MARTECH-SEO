@@ -44,3 +44,11 @@ export function getKeywordGroupingRepairPrompt(): string {
 export function getKeywordGroupingMergeReviewPrompt(): string {
   return loadPrompt('Keyword_grouping_merge_review.md');
 }
+
+export function getPaaBlogSeedSelectionPrompt(): string {
+  return loadPrompt('PAA_blog_seed_selection.md');
+}
+
+export function getPaaBlogIdeasPrompt(): string {
+  return loadPrompt('PAA_blog_ideas.md');
+}

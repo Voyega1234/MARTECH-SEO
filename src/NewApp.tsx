@@ -4,13 +4,17 @@ import { DynamicList } from './components/DynamicList';
 import { ExpandedKeywordTable } from './components/ExpandedKeywordTable';
 import { Header } from './components/Header';
 import { Input } from './components/Input';
+import { PaaBlogWorkspace } from './components/PaaBlogWorkspace';
 import { Sidebar } from './components/Sidebar';
 import { TextArea } from './components/TextArea';
+import { WorkspaceTabs } from './components/WorkspaceTabs';
 import {
+  createPaaBlogJob,
   createKeywordExpansionJob,
   createKeywordGroupingJob,
   filterRelevantKeywords,
   generateSeedKeywords,
+  getPaaBlogJob,
   getKeywordExpansionJob,
   getKeywordExpansionResult,
   getKeywordGroupingJob,
@@ -22,6 +26,7 @@ import type {
   KeywordGroupingJobDetail,
   KeywordGroupingPlanResponse,
   KeywordExpansionResult,
+  PaaBlogJobDetail,
 } from './features/keyword-expansion/types';
 import {
   clearKeywordProjectSnapshot,
@@ -66,8 +71,10 @@ const mockFormData: Record<string, any> = {
 };
 
 type ActivePanel = 'business' | 'seeds' | 'keywords' | 'grouping';
+type ActiveWorkspace = 'keyword' | 'paa-blog';
 type GeneratingState = null | 'seeds' | 'keywords';
 const GROUPING_PLAN_BATCH_SIZE = 2500;
+const DEFAULT_PRE_RELEVANCE_MIN_SEARCH_VOLUME = 0;
 
 type GroupingRunProgress = {
   stage: 'preparing' | 'planning' | 'merging' | 'finalizing';
@@ -159,6 +166,37 @@ function getRelevantKeywordCount(result: KeywordExpansionResult | null): number 
   return Array.isArray(result.keywords) ? result.keywords.length : 0;
 }
 
+function applyPreRelevanceFilters(
+  rows: KeywordExpansionKeywordRow[],
+  options: {
+    minSearchVolume: number;
+    competitorMaxRank: number | null;
+    clientMaxRank: number | null;
+  }
+): KeywordExpansionKeywordRow[] {
+  return rows.filter((row) => {
+    const volume = typeof row.search_volume === 'number' ? row.search_volume : 0;
+    if (volume < options.minSearchVolume) return false;
+
+    if (
+      options.competitorMaxRank !== null &&
+      (typeof row.best_competitor_rank_group !== 'number' || row.best_competitor_rank_group > options.competitorMaxRank)
+    ) {
+      return false;
+    }
+
+    if (
+      options.clientMaxRank !== null &&
+      (typeof row.best_client_website_rank_group !== 'number' ||
+        row.best_client_website_rank_group > options.clientMaxRank)
+    ) {
+      return false;
+    }
+
+    return true;
+  });
+}
+
 function mapGroupingJobToUiProgress(job: KeywordGroupingJobDetail): GroupingRunProgress {
   const phase = job.progress.phase;
   return {
@@ -186,6 +224,7 @@ function mapGroupingJobToUiProgress(job: KeywordGroupingJobDetail): GroupingRunP
 
 export default function NewApp() {
   const [formData, setFormData] = useState<Record<string, any>>({ ...initialFormData });
+  const [activeWorkspace, setActiveWorkspace] = useState<ActiveWorkspace>('keyword');
   const [activePanel, setActivePanel] = useState<ActivePanel>('business');
   const [generating, setGenerating] = useState<GeneratingState>(null);
   const [seedKeywordsText, setSeedKeywordsText] = useState('');
@@ -208,9 +247,21 @@ export default function NewApp() {
   const [seedRunHistory, setSeedRunHistory] = useState<KeywordSeedRunHistoryRow[]>([]);
   const [projects, setProjects] = useState<SeoProject[]>([]);
   const [showProjectList, setShowProjectList] = useState(false);
+  const [projectListError, setProjectListError] = useState('');
   const [projectLoadingName, setProjectLoadingName] = useState<string | null>(null);
   const [projectSearch, setProjectSearch] = useState('');
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
+  const [paaGroupingResult, setPaaGroupingResult] = useState<KeywordGroupingFinalResponse | null>(null);
+  const [paaGroupingLoading, setPaaGroupingLoading] = useState(false);
+  const [paaBlogJob, setPaaBlogJob] = useState<PaaBlogJobDetail | null>(null);
+  const [paaBlogError, setPaaBlogError] = useState('');
+  const [paaBlogRunning, setPaaBlogRunning] = useState(false);
+  const [preRelevanceMinSearchVolume, setPreRelevanceMinSearchVolume] = useState(
+    DEFAULT_PRE_RELEVANCE_MIN_SEARCH_VOLUME
+  );
+  const [preRelevanceCompetitorMaxRank, setPreRelevanceCompetitorMaxRank] = useState('');
+  const [preRelevanceClientMaxRank, setPreRelevanceClientMaxRank] = useState('');
+  const [showAdvancedExpansionOptions, setShowAdvancedExpansionOptions] = useState(false);
 
   const seedKeywords = useMemo(
     () => seedKeywordsText.split('\n').map((item) => item.trim()).filter(Boolean),
@@ -240,6 +291,38 @@ export default function NewApp() {
   );
   const isCurrentFilterSaved =
     filteredKeywordSignature === savedFilteredKeywordSignature && filteredKeywordRows.length === savedFilteredKeywordRows.length;
+
+  useEffect(() => {
+    if (activeWorkspace !== 'paa-blog' || !projectId) {
+      setPaaGroupingResult(null);
+      setPaaGroupingLoading(false);
+      return;
+    }
+
+    let active = true;
+
+    const loadPaaGrouping = async () => {
+      setPaaGroupingLoading(true);
+      try {
+        const latest = await loadLatestKeywordGroupingResult(projectId);
+        if (!active) return;
+        setPaaGroupingResult(latest);
+      } catch {
+        if (!active) return;
+        setPaaGroupingResult(null);
+      } finally {
+        if (active) {
+          setPaaGroupingLoading(false);
+        }
+      }
+    };
+
+    void loadPaaGrouping();
+
+    return () => {
+      active = false;
+    };
+  }, [activeWorkspace, projectId]);
 
   useEffect(() => {
     if (!groupingPlanLoading) {
@@ -447,8 +530,15 @@ export default function NewApp() {
 
   const handleOpenProjects = async () => {
     setProjectSearch('');
-    setProjects(await listProjects());
+    setProjectListError('');
     setShowProjectList(true);
+    try {
+      setProjects(await listProjects());
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Failed to load projects';
+      setProjectListError(message);
+      setError(message);
+    }
   };
 
   const ensureProject = async (): Promise<string | null> => {
@@ -510,6 +600,7 @@ export default function NewApp() {
         competitorDomains,
         clientWebsites,
         locationName: formData.locationName,
+        persistRawKeywords: false,
       });
 
       let currentJob = await getKeywordExpansionJob(created.job_id);
@@ -529,17 +620,31 @@ export default function NewApp() {
       setJob(completedJob);
       let nextExpandedResult = completedJob.result || null;
       if (nextExpandedResult?.keywords?.length) {
+        const originalKeywordCount = nextExpandedResult.keywords.length;
+        const prefilteredKeywords = applyPreRelevanceFilters(nextExpandedResult.keywords, {
+          minSearchVolume: preRelevanceMinSearchVolume,
+          competitorMaxRank: preRelevanceCompetitorMaxRank.trim() ? Number(preRelevanceCompetitorMaxRank) : null,
+          clientMaxRank: preRelevanceClientMaxRank.trim() ? Number(preRelevanceClientMaxRank) : null,
+        });
+
+        if (!prefilteredKeywords.length) {
+          throw new Error('Pre-filter removed all keywords. Lower the min volume or relax the rank filters.');
+        }
+
         setJob({
           ...completedJob,
           status: 'running',
           progress: {
             ...completedJob.progress,
             phase: 'relevance_filter',
-            message: `Checking relevance for ${nextExpandedResult.keywords.length} keywords with Claude Haiku 4.5`,
+            message:
+              prefilteredKeywords.length === originalKeywordCount
+                ? `Checking relevance for ${prefilteredKeywords.length} keywords with Claude Haiku 4.5`
+                : `Checking relevance for ${prefilteredKeywords.length} of ${originalKeywordCount} keywords after pre-filter`,
             current_item: null,
           },
         });
-        const relevanceResult = await filterRelevantKeywords(formData, nextExpandedResult.keywords);
+        const relevanceResult = await filterRelevantKeywords(formData, prefilteredKeywords);
         nextExpandedResult = {
           ...nextExpandedResult,
           summary: {
@@ -603,6 +708,11 @@ export default function NewApp() {
     setGroupingRunProgress(null);
     setProjectId(null);
     setSeedRunHistory([]);
+    setPaaGroupingResult(null);
+    setPaaGroupingLoading(false);
+    setPaaBlogJob(null);
+    setPaaBlogError('');
+    setPaaBlogRunning(false);
   };
 
   const handleStepClick = (stepId: string) => {
@@ -756,6 +866,9 @@ export default function NewApp() {
     setError('');
     setGroupingPlanLoading(false);
     setGroupingRunProgress(null);
+    setPaaBlogJob(null);
+    setPaaBlogError('');
+    setPaaBlogRunning(false);
     try {
       const [fullProject, latestExpansionResult, seedRuns] = await Promise.all([
         loadProject(project.id),
@@ -837,14 +950,75 @@ export default function NewApp() {
     }
   };
 
+  const handleRunPaaBlog = async () => {
+    if (!projectId) {
+      setPaaBlogError('Select a project before running PAA Blog.');
+      return;
+    }
+
+    if (!paaGroupingResult?.result?.groups?.length) {
+      setPaaBlogError('Latest keyword grouping output is required before running PAA Blog.');
+      return;
+    }
+
+    setPaaBlogRunning(true);
+    setPaaBlogError('');
+    setPaaBlogJob(null);
+
+    try {
+      const created = await createPaaBlogJob(formData, paaGroupingResult.result);
+      let currentJob = await getPaaBlogJob(created.job_id);
+      setPaaBlogJob(currentJob);
+
+      while (currentJob.status === 'queued' || currentJob.status === 'running') {
+        await sleep(1500);
+        currentJob = await getPaaBlogJob(created.job_id);
+        setPaaBlogJob(currentJob);
+      }
+
+      if (currentJob.status !== 'completed' || !currentJob.result) {
+        throw new Error(currentJob.error || 'Failed to generate PAA Blog ideas');
+      }
+
+      setPaaBlogJob(currentJob);
+    } catch (err) {
+      setPaaBlogError(err instanceof Error ? err.message : 'Failed to generate PAA Blog ideas');
+    } finally {
+      setPaaBlogRunning(false);
+    }
+  };
+
+  const handleExportPaaBlogCsv = () => {
+    const rows = paaBlogJob?.result?.ideas || [];
+    if (!rows.length) return;
+
+    const escapeCsv = (value: string) => `"${String(value || '').replace(/"/g, '""')}"`;
+    const csv = [
+      ['Blog Title', 'Source', 'Source Seed', 'Programmatic Variables'].join(','),
+      ...rows.map((row) =>
+        [
+          escapeCsv(row.blog_title),
+          escapeCsv(row.source),
+          escapeCsv(row.source_seed),
+          escapeCsv(row.programmatic_variables || ''),
+        ].join(',')
+      ),
+    ].join('\n');
+
+    const filenameBase = normalizeDomain(formData.websiteUrl || formData.businessName || 'paa-blog') || 'paa-blog';
+    downloadTextFile(`${filenameBase}-paa-blog.csv`, csv, 'text/csv;charset=utf-8;');
+  };
+
   return (
     <div className="h-screen flex flex-col overflow-hidden bg-[#f5f5f7]">
       <Header
         projectName={projectName}
         onOpenProjects={handleOpenProjects}
         onNewProject={handleStartOver}
-        showActions={!!expandedResult}
+        showActions={activeWorkspace === 'keyword' && !!expandedResult}
       />
+
+      <WorkspaceTabs activeWorkspace={activeWorkspace} onChange={setActiveWorkspace} />
 
       {showProjectList && (
         <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/30 backdrop-blur-sm">
@@ -868,46 +1042,63 @@ export default function NewApp() {
                 className="w-full rounded-xl border border-[#d2d2d7] bg-[#f5f5f7] px-4 py-2.5 text-[13px] mb-3"
               />
 
-              {filteredProjects.map((project) => (
-                <div
-                  key={project.id}
-                  className="flex items-center gap-3 px-4 py-3 rounded-xl mb-1.5 cursor-pointer hover:bg-[#f5f5f7]"
-                  onClick={() => handleLoadProject(project)}
-                >
-                  <div className="flex-1 min-w-0">
-                    <div className="text-[14px] font-medium text-[#1d1d1f] truncate">
-                      {project.business_name}
-                    </div>
-                    <div className="text-[11px] text-[#8e8e93]">{formatTimestamp(project.created_at)}</div>
+              {projectListError ? (
+                <div className="mb-3 rounded-xl border border-[#fecaca] bg-[#fff5f5] px-4 py-3 text-[12px] text-[#b42318]">
+                  {projectListError}
+                </div>
+              ) : null}
+
+              {!projectListError && filteredProjects.length === 0 ? (
+                <div className="rounded-xl border border-dashed border-[#d2d2d7] bg-[#fcfcfd] px-4 py-6 text-center">
+                  <div className="text-[14px] font-medium text-[#1d1d1f]">No projects found</div>
+                  <div className="text-[12px] text-[#8e8e93] mt-1">
+                    {projects.length === 0
+                      ? 'Supabase returned no visible rows for seo_projects.'
+                      : 'No projects match the current search.'}
                   </div>
-                  {deleteConfirmId === project.id ? (
-                    <div className="flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
+                </div>
+              ) : (
+                filteredProjects.map((project) => (
+                  <div
+                    key={project.id}
+                    className="flex items-center gap-3 px-4 py-3 rounded-xl mb-1.5 cursor-pointer hover:bg-[#f5f5f7]"
+                    onClick={() => handleLoadProject(project)}
+                  >
+                    <div className="flex-1 min-w-0">
+                      <div className="text-[14px] font-medium text-[#1d1d1f] truncate">
+                        {project.business_name}
+                      </div>
+                      <div className="text-[11px] text-[#8e8e93]">{formatTimestamp(project.created_at)}</div>
+                    </div>
+                    {deleteConfirmId === project.id ? (
+                      <div className="flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
+                        <button
+                          onClick={() => handleDeleteProject(project.id)}
+                          className="px-2 py-1 rounded-md text-[11px] font-medium text-white bg-[#ff3b30] border-none"
+                        >
+                          Delete
+                        </button>
+                        <button
+                          onClick={() => setDeleteConfirmId(null)}
+                          className="px-2 py-1 rounded-md text-[11px] font-medium text-[#6e6e73] bg-[#f5f5f7] border-none"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    ) : (
                       <button
-                        onClick={() => handleDeleteProject(project.id)}
-                        className="px-2 py-1 rounded-md text-[11px] font-medium text-white bg-[#ff3b30] border-none"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setDeleteConfirmId(project.id);
+                        }}
+                        className="text-[#8e8e93] border-none bg-transparent cursor-pointer"
                       >
                         Delete
                       </button>
-                      <button
-                        onClick={() => setDeleteConfirmId(null)}
-                        className="px-2 py-1 rounded-md text-[11px] font-medium text-[#6e6e73] bg-[#f5f5f7] border-none"
-                      >
-                        Cancel
-                      </button>
-                    </div>
-                  ) : (
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setDeleteConfirmId(project.id);
-                      }}
-                      className="text-[#8e8e93] border-none bg-transparent cursor-pointer"
-                    >
-                      Delete
-                    </button>
-                  )}
-                </div>
-              ))}
+                    )}
+                  </div>
+                ))
+              )}
             </div>
           </div>
         </div>
@@ -923,9 +1114,24 @@ export default function NewApp() {
       )}
 
       <div className="flex flex-1 overflow-hidden">
-        <Sidebar steps={sidebarSteps} onStepClick={handleStepClick} />
+        {activeWorkspace === 'keyword' ? <Sidebar steps={sidebarSteps} onStepClick={handleStepClick} /> : null}
 
         <main className="flex-1 overflow-hidden flex flex-col bg-white">
+          {activeWorkspace === 'paa-blog' ? (
+            <PaaBlogWorkspace
+              projectId={projectId}
+              formData={formData}
+              expandedResult={expandedResult}
+              groupingResult={paaGroupingResult}
+              groupingLoading={paaGroupingLoading}
+              paaJob={paaBlogJob}
+              paaError={paaBlogError}
+              paaRunning={paaBlogRunning}
+              onRun={handleRunPaaBlog}
+              onExportCsv={handleExportPaaBlogCsv}
+            />
+          ) : (
+            <>
           {activePanel === 'business' && (
             <div className="flex flex-col h-full animate-fadeIn">
               <div className="px-7 pt-5 shrink-0">
@@ -1216,6 +1422,74 @@ export default function NewApp() {
                       <div className="text-[12px] font-semibold text-[#1d1d1f]">Next Step</div>
                       <div className="text-[12px] text-[#6e6e73] mt-1 leading-5">
                         Confirm this seed set, then run Step 2 to expand keywords and load the results table.
+                      </div>
+                      <div className="pt-4">
+                        <div className="overflow-hidden rounded-xl border border-[#e8e8ed] bg-white">
+                          <button
+                            type="button"
+                            onClick={() => setShowAdvancedExpansionOptions((current) => !current)}
+                            className="flex w-full items-center justify-between px-3 py-2.5 text-left"
+                          >
+                            <div>
+                              <div className="text-[12px] font-semibold text-[#1d1d1f]">Advanced Options</div>
+                              <div className="text-[11px] text-[#8e8e93] mt-0.5">
+                                Optional pre-filter before relevance check
+                              </div>
+                            </div>
+                            <div className="text-[16px] leading-none text-[#6e6e73]">
+                              {showAdvancedExpansionOptions ? '−' : '+'}
+                            </div>
+                          </button>
+
+                          {showAdvancedExpansionOptions ? (
+                            <div className="grid gap-3 border-t border-[#f1f1f4] px-3 py-3">
+                            <div className="grid gap-3 sm:grid-cols-3">
+                              <div>
+                                <div className="text-[11px] uppercase tracking-[0.6px] text-[#8e8e93] mb-1.5">
+                                  Min Search Volume
+                                </div>
+                                <Input
+                                  type="number"
+                                  min={0}
+                                  value={preRelevanceMinSearchVolume}
+                                  onChange={(e) =>
+                                    setPreRelevanceMinSearchVolume(
+                                      e.target.value === '' ? 0 : Math.max(Number(e.target.value), 0)
+                                    )
+                                  }
+                                />
+                              </div>
+                              <div>
+                                <div className="text-[11px] uppercase tracking-[0.6px] text-[#8e8e93] mb-1.5">
+                                  Competitor Max Rank
+                                </div>
+                                <Input
+                                  type="number"
+                                  min={1}
+                                  placeholder="Any"
+                                  value={preRelevanceCompetitorMaxRank}
+                                  onChange={(e) => setPreRelevanceCompetitorMaxRank(e.target.value)}
+                                />
+                              </div>
+                              <div>
+                                <div className="text-[11px] uppercase tracking-[0.6px] text-[#8e8e93] mb-1.5">
+                                  Client Max Rank
+                                </div>
+                                <Input
+                                  type="number"
+                                  min={1}
+                                  placeholder="Any"
+                                  value={preRelevanceClientMaxRank}
+                                  onChange={(e) => setPreRelevanceClientMaxRank(e.target.value)}
+                                />
+                              </div>
+                            </div>
+                            <div className="text-[11px] text-[#8e8e93] leading-5">
+                              These filters are applied after Step 2 finishes and before sending keywords into the relevance check.
+                            </div>
+                            </div>
+                          ) : null}
+                        </div>
                       </div>
                       <div className="flex flex-col gap-2.5 pt-4">
                         <button
@@ -1570,6 +1844,8 @@ export default function NewApp() {
                 )}
               </div>
             </div>
+          )}
+            </>
           )}
         </main>
       </div>

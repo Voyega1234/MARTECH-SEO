@@ -42,6 +42,7 @@ class ExpandRequest(BaseModel):
     seed_keywords: list[str] = Field(min_length=1)
     competitor_domains: list[str] = Field(default_factory=list)
     client_websites: list[str] = Field(default_factory=list)
+    persist_raw_keywords: bool = Field(default=False)
     location_name: str = Field(default=DFS_LOCATION_NAME)
     seed_limit_per_page: int = Field(default=DEFAULT_SEED_PAGE_SIZE, ge=1, le=1000)
     competitor_limit_per_page: int = Field(default=DEFAULT_COMPETITOR_PAGE_SIZE, ge=1, le=1000)
@@ -1228,7 +1229,7 @@ async def run_expand_job(job_id: str) -> None:
             job.result = result
             job.csv_text = csv_text
 
-        if job.request.project_id:
+        if job.request.project_id and job.request.persist_raw_keywords:
             await persistence.insert_keywords_and_sources(
                 job_id=job_id,
                 project_id=job.request.project_id,

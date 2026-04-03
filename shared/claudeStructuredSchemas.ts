@@ -117,3 +117,51 @@ export function getKeywordRelevanceFilterJsonSchema(): ClaudeJsonSchemaConfig {
     },
   };
 }
+
+export function getPaaSeedSelectionJsonSchema(): ClaudeJsonSchemaConfig {
+  return {
+    name: 'paa_seed_selection',
+    schema: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['thai_seeds', 'english_seeds'],
+      properties: {
+        thai_seeds: {
+          type: 'array',
+          items: { type: 'string' },
+        },
+        english_seeds: {
+          type: 'array',
+          items: { type: 'string' },
+        },
+      },
+    },
+  };
+}
+
+export function getPaaBlogIdeasJsonSchema(): ClaudeJsonSchemaConfig {
+  return {
+    name: 'paa_blog_ideas',
+    schema: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['ideas'],
+      properties: {
+        ideas: {
+          type: 'array',
+          items: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['blog_title', 'source', 'source_seed', 'programmatic_variables'],
+            properties: {
+              blog_title: { type: 'string' },
+              source: { type: 'string', enum: ['PAA', 'Related Search'] },
+              source_seed: { type: 'string' },
+              programmatic_variables: { type: 'string' },
+            },
+          },
+        },
+      },
+    },
+  };
+}

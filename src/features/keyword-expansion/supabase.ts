@@ -1,8 +1,13 @@
 import { supabase } from '../../lib/supabase';
-import type { KeywordExpansionResult, KeywordGroupingFinalResponse } from './types';
+import type {
+  KeywordExpansionKeywordRow,
+  KeywordExpansionResult,
+  KeywordGroupingFinalResponse,
+} from './types';
 import { renderKeywordGroupingCsv } from '../../../shared/keywordGroupingOutput.ts';
 
 const SUPABASE_PAGE_SIZE = 1000;
+const SUPABASE_MUTATION_CHUNK_SIZE = 500;
 
 export interface KeywordExpansionRunRow {
   id: string;
@@ -180,6 +185,14 @@ async function fetchAllRows<T>(
   return rows;
 }
 
+function chunkArray<T>(items: T[], size: number): T[][] {
+  const chunks: T[][] = [];
+  for (let index = 0; index < items.length; index += size) {
+    chunks.push(items.slice(index, index + size));
+  }
+  return chunks;
+}
+
 export async function loadLatestKeywordExpansionResult(
   projectId: string
 ): Promise<KeywordExpansionResult | null> {
@@ -291,6 +304,10 @@ export async function loadLatestKeywordExpansionResult(
     };
   });
 
+  if (!keywords.length) {
+    return null;
+  }
+
   return {
     summary: {
       total_seed_keywords: run.total_seed_keywords || 0,
@@ -311,6 +328,80 @@ export async function loadLatestKeywordExpansionResult(
     source_catalog: sourceCatalog,
     keywords,
   };
+}
+
+export async function pruneLatestKeywordExpansionRunToRelevant(
+  projectId: string,
+  keywords: KeywordExpansionKeywordRow[]
+): Promise<void> {
+  const { data: run, error: runError } = await supabase
+    .from('keyword_expansion_runs')
+    .select('id')
+    .eq('project_id', projectId)
+    .eq('status', 'completed')
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (runError) {
+    throw new Error(`Failed to load latest keyword expansion run for pruning: ${runError.message}`);
+  }
+
+  if (!run) return;
+
+  const keywordRows = await fetchAllRows<{ id: string; normalized_keyword: string }>((from, to) =>
+    supabase
+      .from('keyword_expansion_keywords')
+      .select('id, normalized_keyword')
+      .eq('run_id', run.id)
+      .range(from, to)
+  ).catch((error) => {
+    throw new Error(`Failed to load latest keyword ids for pruning: ${error.message}`);
+  });
+
+  const keepNormalized = new Set(
+    keywords
+      .map((row) => row.keyword.trim().toLowerCase().replace(/\s+/g, ''))
+      .filter(Boolean)
+  );
+
+  const deleteIds = keywordRows
+    .filter((row) => !keepNormalized.has(row.normalized_keyword))
+    .map((row) => row.id);
+
+  for (const batch of chunkArray(deleteIds, SUPABASE_MUTATION_CHUNK_SIZE)) {
+    const { error: deleteError } = await supabase
+      .from('keyword_expansion_keywords')
+      .delete()
+      .in('id', batch);
+
+    if (deleteError) {
+      throw new Error(`Failed to prune non-relevant keywords: ${deleteError.message}`);
+    }
+  }
+
+  const baseRunPayload = {
+    deduped_keywords: keywords.length,
+  };
+
+  const { error: updateError } = await supabase
+    .from('keyword_expansion_runs')
+    .update({
+      ...baseRunPayload,
+      relevant_keyword_count: keywords.length,
+    } as any)
+    .eq('id', run.id);
+
+  if (updateError) {
+    const { error: fallbackUpdateError } = await supabase
+      .from('keyword_expansion_runs')
+      .update(baseRunPayload)
+      .eq('id', run.id);
+
+    if (fallbackUpdateError) {
+      throw new Error(`Failed to update latest keyword expansion run after pruning: ${fallbackUpdateError.message}`);
+    }
+  }
 }
 
 export async function saveKeywordGroupingResult(

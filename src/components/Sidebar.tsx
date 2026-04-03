@@ -8,9 +8,10 @@ interface SidebarStep {
 interface SidebarProps {
   steps: SidebarStep[];
   onStepClick: (stepId: string) => void;
+  allowPendingClicks?: boolean;
 }
 
-export function Sidebar({ steps, onStepClick }: SidebarProps) {
+export function Sidebar({ steps, onStepClick, allowPendingClicks = false }: SidebarProps) {
   return (
     <nav className="w-[220px] bg-white border-r border-[#e8e8ed] flex flex-col shrink-0 overflow-y-auto py-4">
       <div className="text-[10px] font-semibold text-[#aeaeb2] tracking-[0.8px] uppercase px-4 mb-1">
@@ -21,7 +22,7 @@ export function Sidebar({ steps, onStepClick }: SidebarProps) {
         const isActive = step.state === 'active';
         const isComplete = step.state === 'complete';
         const isPending = step.state === 'pending';
-        const isClickable = !isPending || step.id === 'seeds';
+        const isClickable = allowPendingClicks || !isPending || step.id === 'seeds';
 
         return (
           <button

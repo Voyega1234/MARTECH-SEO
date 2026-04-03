@@ -2,6 +2,8 @@ import type {
   KeywordExpansionJobCreated,
   KeywordExpansionJob,
   KeywordExpansionJobRequest,
+  PaaBlogJobCreated,
+  PaaBlogJobDetail,
   KeywordGroupingJobCreated,
   KeywordGroupingJobDetail,
   KeywordGroupingFinalResponse,
@@ -17,6 +19,7 @@ const STEP2_API_BASE = (
 const STEP3_API_BASE = (
   import.meta.env.VITE_STEP3_API_BASE_URL || '/api/keywords'
 ).replace(/\/$/, '');
+const CLIENT_RELEVANCE_FILTER_BATCH_SIZE = 2000;
 
 function buildRequestBody(input: KeywordExpansionJobRequest) {
   return {
@@ -28,6 +31,7 @@ function buildRequestBody(input: KeywordExpansionJobRequest) {
     seed_limit_per_page: input.seedLimitPerPage,
     competitor_limit_per_page: input.competitorLimitPerPage,
     competitor_top_rank: input.competitorTopRank,
+    persist_raw_keywords: input.persistRawKeywords,
   };
 }
 
@@ -65,26 +69,45 @@ export async function filterRelevantKeywords(
   formData: Record<string, any>,
   keywords: KeywordExpansionKeywordRow[]
 ): Promise<KeywordRelevanceFilterResponse> {
-  const res = await fetch(`${STEP3_API_BASE}/relevance-filter`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ formData, keywords }),
-  });
+  const relevantKeywords: KeywordExpansionKeywordRow[] = [];
+  const rawParts: string[] = [];
+  let totalBackendBatches = 0;
 
-  if (!res.ok) {
-    let message = `Keyword relevance filter error: ${res.status}`;
-    try {
-      const errorPayload = await res.json();
-      if (errorPayload?.error) {
-        message = errorPayload.error;
+  for (let index = 0; index < keywords.length; index += CLIENT_RELEVANCE_FILTER_BATCH_SIZE) {
+    const batch = keywords.slice(index, index + CLIENT_RELEVANCE_FILTER_BATCH_SIZE);
+    const res = await fetch(`${STEP3_API_BASE}/relevance-filter`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ formData, keywords: batch }),
+    });
+
+    if (!res.ok) {
+      let message = `Keyword relevance filter error: ${res.status}`;
+      try {
+        const errorPayload = await res.json();
+        if (errorPayload?.error) {
+          message = errorPayload.error;
+        }
+      } catch {
+        // ignore parse failures and keep default message
       }
-    } catch {
-      // ignore parse failures and keep default message
+      throw new Error(message);
     }
-    throw new Error(message);
+
+    const batchResult: KeywordRelevanceFilterResponse = await res.json();
+    relevantKeywords.push(...batchResult.relevant_keywords);
+    rawParts.push(`Client Batch ${Math.floor(index / CLIENT_RELEVANCE_FILTER_BATCH_SIZE) + 1}\n${batchResult.raw}`);
+    totalBackendBatches += batchResult.batch_count;
   }
 
-  return res.json();
+  return {
+    success: true,
+    relevant_keywords: relevantKeywords,
+    input_keyword_count: keywords.length,
+    relevant_keyword_count: relevantKeywords.length,
+    batch_count: totalBackendBatches,
+    raw: rawParts.join('\n\n'),
+  };
 }
 
 export async function getKeywordExpansionJob(jobId: string): Promise<KeywordExpansionJob> {
@@ -191,6 +214,51 @@ export async function getKeywordGroupingJob(jobId: string): Promise<KeywordGroup
 
   if (!res.ok) {
     let message = `Grouping job error: ${res.status}`;
+    try {
+      const errorPayload = await res.json();
+      if (errorPayload?.error) {
+        message = errorPayload.error;
+      }
+    } catch {
+      // ignore parse failures and keep default message
+    }
+    throw new Error(message);
+  }
+
+  return res.json();
+}
+
+export async function createPaaBlogJob(
+  formData: Record<string, any>,
+  keywordMap: KeywordGroupingFinalResponse['result'] | null
+): Promise<PaaBlogJobCreated> {
+  const res = await fetch(`${STEP3_API_BASE}/paa-blog-jobs`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ formData, keywordMap }),
+  });
+
+  if (!res.ok) {
+    let message = `PAA Blog job error: ${res.status}`;
+    try {
+      const errorPayload = await res.json();
+      if (errorPayload?.error) {
+        message = errorPayload.error;
+      }
+    } catch {
+      // ignore parse failures and keep default message
+    }
+    throw new Error(message);
+  }
+
+  return res.json();
+}
+
+export async function getPaaBlogJob(jobId: string): Promise<PaaBlogJobDetail> {
+  const res = await fetch(`${STEP3_API_BASE}/paa-blog-jobs/${jobId}`);
+
+  if (!res.ok) {
+    let message = `PAA Blog job error: ${res.status}`;
     try {
       const errorPayload = await res.json();
       if (errorPayload?.error) {

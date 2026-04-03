@@ -7,6 +7,7 @@ export interface KeywordExpansionJobRequest {
   seedLimitPerPage?: number;
   competitorLimitPerPage?: number;
   competitorTopRank?: number;
+  persistRawKeywords?: boolean;
 }
 
 export interface SeedKeywordResponse {
@@ -176,5 +177,58 @@ export interface KeywordGroupingJobDetail {
   plan?: KeywordGroupingPlan;
   plan_raw?: string | null;
   result?: KeywordGroupingFinalResultPayload;
+  raw?: string | null;
+}
+
+export interface PaaBlogIdeaRow {
+  blog_title: string;
+  source: 'PAA' | 'Related Search';
+  source_seed: string;
+  programmatic_variables: string;
+}
+
+export interface PaaBlogCollectedEntry {
+  query: string;
+  source: 'PAA' | 'Related Search';
+  source_seed: string;
+  seed_language: 'th' | 'en';
+}
+
+export interface PaaBlogSeedPlan {
+  thai_seeds: string[];
+  english_seeds: string[];
+}
+
+export interface PaaBlogResultPayload {
+  seed_plan: PaaBlogSeedPlan;
+  collected_entries: PaaBlogCollectedEntry[];
+  ideas: PaaBlogIdeaRow[];
+  collected_entry_count: number;
+  idea_count: number;
+  keyword_map_group_count: number;
+}
+
+export interface PaaBlogJobCreated {
+  job_id: string;
+  status: 'queued' | 'running' | 'completed' | 'failed';
+}
+
+export interface PaaBlogJobProgress {
+  phase: 'queued' | 'seed_selection' | 'collecting_thai' | 'collecting_english' | 'finalizing' | 'completed' | 'failed';
+  total_serp_calls: number;
+  completed_serp_calls: number;
+  current_seed: string | null;
+  message: string | null;
+}
+
+export interface PaaBlogJobDetail {
+  job_id: string;
+  status: 'queued' | 'running' | 'completed' | 'failed';
+  created_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+  progress: PaaBlogJobProgress;
+  error: string | null;
+  result?: PaaBlogResultPayload;
   raw?: string | null;
 }
