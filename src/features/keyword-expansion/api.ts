@@ -14,10 +14,14 @@ import type {
 } from './types';
 
 const STEP2_API_BASE = (
-  import.meta.env.VITE_STEP2_API_BASE_URL || 'http://127.0.0.1:8010'
+  import.meta.env.DEV
+    ? 'http://127.0.0.1:8010'
+    : (import.meta.env.VITE_STEP2_API_BASE_URL || 'http://127.0.0.1:8010')
 ).replace(/\/$/, '');
 const STEP3_API_BASE = (
-  import.meta.env.VITE_STEP3_API_BASE_URL || '/api/keywords'
+  import.meta.env.DEV
+    ? '/api/keywords'
+    : (import.meta.env.VITE_STEP3_API_BASE_URL || '/api/keywords')
 ).replace(/\/$/, '');
 const CLIENT_RELEVANCE_FILTER_BATCH_SIZE = 2000;
 
@@ -185,12 +189,13 @@ export async function generateKeywordGroupingFinal(
 
 export async function createKeywordGroupingJob(
   formData: Record<string, any>,
-  keywords: KeywordExpansionKeywordRow[]
+  keywords: KeywordExpansionKeywordRow[],
+  previewOnly = false
 ): Promise<KeywordGroupingJobCreated> {
   const res = await fetch(`${STEP3_API_BASE}/grouping-jobs`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ formData, keywords }),
+    body: JSON.stringify({ formData, keywords, previewOnly }),
   });
 
   if (!res.ok) {

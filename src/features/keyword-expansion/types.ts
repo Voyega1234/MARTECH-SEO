@@ -136,6 +136,7 @@ export interface KeywordGroupingFinalGroup {
 }
 
 export interface KeywordGroupingFinalResultPayload {
+  preview_only?: boolean;
   groups: KeywordGroupingFinalGroup[];
   csv: string;
   group_count: number;
@@ -153,6 +154,7 @@ export interface KeywordGroupingFinalResponse {
 export interface KeywordGroupingJobCreated {
   job_id: string;
   status: 'queued' | 'running' | 'completed' | 'failed';
+  preview_only?: boolean;
 }
 
 export interface KeywordGroupingJobProgress {
@@ -169,6 +171,7 @@ export interface KeywordGroupingJobProgress {
 export interface KeywordGroupingJobDetail {
   job_id: string;
   status: 'queued' | 'running' | 'completed' | 'failed';
+  preview_only?: boolean;
   created_at: string;
   started_at: string | null;
   completed_at: string | null;

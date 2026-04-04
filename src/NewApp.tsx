@@ -243,6 +243,7 @@ export default function NewApp() {
   const [groupingFinalError, setGroupingFinalError] = useState('');
   const [groupingRunProgress, setGroupingRunProgress] = useState<GroupingRunProgress | null>(null);
   const [groupingElapsedSeconds, setGroupingElapsedSeconds] = useState(0);
+  const [groupingPreviewMode, setGroupingPreviewMode] = useState(false);
   const [projectId, setProjectId] = useState<string | null>(null);
   const [seedRunHistory, setSeedRunHistory] = useState<KeywordSeedRunHistoryRow[]>([]);
   const [projects, setProjects] = useState<SeoProject[]>([]);
@@ -280,6 +281,7 @@ export default function NewApp() {
   const groupingPillarCount = groupingPlanResult
     ? groupingPlanResult.plan.product_lines.reduce((sum, productLine) => sum + productLine.pillars.length, 0)
     : 0;
+  const isGroupingPreviewOnly = groupingPreviewMode || Boolean(groupingFinalResult?.result.preview_only);
   const step3Running = groupingPlanLoading;
   const filteredKeywordSignature = useMemo(
     () => filteredKeywordRows.map((row) => row.keyword).join('\u0001'),
@@ -360,6 +362,7 @@ export default function NewApp() {
         let currentJob = await getKeywordGroupingJob(storedJob.jobId);
         if (!active) return;
 
+        setGroupingPreviewMode(Boolean(currentJob.preview_only || currentJob.result?.preview_only));
         setGroupingRunProgress(mapGroupingJobToUiProgress(currentJob));
 
         while (currentJob.status === 'queued' || currentJob.status === 'running') {
@@ -371,16 +374,20 @@ export default function NewApp() {
 
         clearStoredGroupingJobRef();
 
-        if (currentJob.status === 'completed' && currentJob.result && currentJob.plan) {
-          setGroupingPlanResult({
-            success: true,
-            plan: currentJob.plan,
-            raw: currentJob.plan_raw || '',
-            input_keyword_count: currentJob.progress.input_keyword_count,
-            used_keyword_count: currentJob.progress.input_keyword_count,
-            truncated: false,
-            batch_count: currentJob.progress.total_plan_batches,
-          });
+        if (currentJob.status === 'completed' && currentJob.result) {
+          if (currentJob.plan) {
+            setGroupingPlanResult({
+              success: true,
+              plan: currentJob.plan,
+              raw: currentJob.plan_raw || '',
+              input_keyword_count: currentJob.progress.input_keyword_count,
+              used_keyword_count: currentJob.progress.input_keyword_count,
+              truncated: false,
+              batch_count: currentJob.progress.total_plan_batches,
+            });
+          } else {
+            setGroupingPlanResult(null);
+          }
 
           const finalResponse: KeywordGroupingFinalResponse = {
             success: true,
@@ -388,7 +395,8 @@ export default function NewApp() {
             raw: currentJob.raw || '',
           };
           setGroupingFinalResult(finalResponse);
-          if (projectId) {
+          setGroupingPreviewMode(Boolean(currentJob.result.preview_only));
+          if (projectId && !currentJob.result.preview_only) {
             await saveKeywordGroupingResult(projectId, finalResponse);
           }
           setGroupingPlanError('');
@@ -397,12 +405,14 @@ export default function NewApp() {
           const message = currentJob.error || 'Failed to generate keyword grouping output';
           setGroupingPlanError(message);
           setGroupingFinalError(message);
+          setGroupingPreviewMode(false);
         }
       } catch (err) {
         if (!active) return;
         const message = err instanceof Error ? err.message : 'Failed to resume keyword grouping job';
         setGroupingPlanError(message);
         setGroupingFinalError(message);
+        setGroupingPreviewMode(false);
       } finally {
         if (active) {
           setGroupingPlanLoading(false);
@@ -443,6 +453,7 @@ export default function NewApp() {
         const latestGroupingResult = await loadLatestKeywordGroupingResult(projectId);
         if (!active || !latestGroupingResult) return;
         setGroupingFinalResult(latestGroupingResult);
+        setGroupingPreviewMode(Boolean(latestGroupingResult.result.preview_only));
       } catch {
         // Ignore lazy-load failures and keep the UI usable.
       }
@@ -784,13 +795,14 @@ export default function NewApp() {
     setIsEditingSeeds(false);
   };
 
-  const handleGenerateGroupingPlan = async () => {
+  const handleGenerateGroupingPlan = async (previewOnly = false) => {
     if (!savedFilteredKeywordRows.length) {
       setGroupingPlanError('No saved keyword set available for keyword grouping.');
       return;
     }
 
     setGroupingPlanLoading(true);
+    setGroupingPreviewMode(previewOnly);
     setGroupingPlanError('');
     setActivePanel('grouping');
     setGroupingPlanResult(null);
@@ -806,10 +818,12 @@ export default function NewApp() {
         completedBatches: 0,
         currentBatch: estimatedPlanBatches ? 1 : 0,
         inputKeywordCount: limitedKeywords.length,
-        message: `Preparing ${limitedKeywords.length} keywords for keyword grouping`,
+        message: previewOnly
+          ? `Preparing ${limitedKeywords.length} keywords for groups preview`
+          : `Preparing ${limitedKeywords.length} keywords for keyword grouping`,
       });
 
-      const created = await createKeywordGroupingJob(formData, limitedKeywords);
+      const created = await createKeywordGroupingJob(formData, limitedKeywords, previewOnly);
       writeStoredGroupingJobRef({ jobId: created.job_id, projectId: projectId || null });
 
       let currentJob = await getKeywordGroupingJob(created.job_id);
@@ -823,19 +837,23 @@ export default function NewApp() {
 
       clearStoredGroupingJobRef();
 
-      if (currentJob.status !== 'completed' || !currentJob.result || !currentJob.plan) {
+      if (currentJob.status !== 'completed' || !currentJob.result) {
         throw new Error(currentJob.error || 'Failed to generate keyword grouping output');
       }
 
-      setGroupingPlanResult({
-        success: true,
-        plan: currentJob.plan,
-        raw: currentJob.plan_raw || '',
-        input_keyword_count: currentJob.progress.input_keyword_count,
-        used_keyword_count: currentJob.progress.input_keyword_count,
-        truncated: false,
-        batch_count: currentJob.progress.total_plan_batches,
-      });
+      if (currentJob.plan) {
+        setGroupingPlanResult({
+          success: true,
+          plan: currentJob.plan,
+          raw: currentJob.plan_raw || '',
+          input_keyword_count: currentJob.progress.input_keyword_count,
+          used_keyword_count: currentJob.progress.input_keyword_count,
+          truncated: false,
+          batch_count: currentJob.progress.total_plan_batches,
+        });
+      } else {
+        setGroupingPlanResult(null);
+      }
 
       const finalResponse: KeywordGroupingFinalResponse = {
         success: true,
@@ -844,7 +862,8 @@ export default function NewApp() {
       };
 
       setGroupingFinalResult(finalResponse);
-      if (projectId) {
+      setGroupingPreviewMode(Boolean(currentJob.result.preview_only || previewOnly));
+      if (projectId && !currentJob.result.preview_only) {
         await saveKeywordGroupingResult(projectId, finalResponse);
       }
       setGroupingRunProgress(null);
@@ -854,6 +873,7 @@ export default function NewApp() {
       setGroupingPlanError(message);
       setGroupingFinalError(message);
       setGroupingRunProgress(null);
+      setGroupingPreviewMode(false);
     } finally {
       setGroupingPlanLoading(false);
     }
@@ -901,6 +921,7 @@ export default function NewApp() {
         setGroupingPlanResult(null);
         setGroupingPlanError('');
         setGroupingFinalResult(null);
+        setGroupingPreviewMode(false);
         setGroupingFinalError('');
         const nextSeedKeywordsText = (stored.source_catalog.s || []).join('\n');
         setSeedKeywordsText(nextSeedKeywordsText);
@@ -919,6 +940,7 @@ export default function NewApp() {
         setGroupingPlanResult(null);
         setGroupingPlanError('');
         setGroupingFinalResult(null);
+        setGroupingPreviewMode(false);
         setGroupingFinalError('');
         setSeedKeywordsText('');
         setDraftSeedKeywordsText('');
@@ -938,6 +960,7 @@ export default function NewApp() {
     setGroupingPlanResult(null);
     setGroupingPlanError('');
     setGroupingFinalResult(null);
+    setGroupingPreviewMode(false);
     setGroupingFinalError('');
   };
 
@@ -1579,14 +1602,24 @@ export default function NewApp() {
                     </div>
                   </div>
                   {expandedResult ? (
-                    <button
-                      type="button"
-                      onClick={handleGenerateGroupingPlan}
-                      disabled={step3Running || !savedFilteredKeywordRows.length}
-                      className="inline-flex items-center gap-1.5 px-4 py-[9px] rounded-lg text-[13px] font-medium text-white bg-[#0071e3] border-none cursor-pointer"
-                    >
-                      {step3Running ? 'Generating Keyword Grouping...' : 'Generate Keyword Grouping'}
-                    </button>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => handleGenerateGroupingPlan(false)}
+                        disabled={step3Running || !savedFilteredKeywordRows.length}
+                        className="inline-flex items-center gap-1.5 px-4 py-[9px] rounded-lg text-[13px] font-medium text-white bg-[#0071e3] border-none cursor-pointer"
+                      >
+                        {step3Running ? 'Generating Keyword Grouping...' : 'Generate Keyword Grouping'}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleGenerateGroupingPlan(true)}
+                        disabled={step3Running || !savedFilteredKeywordRows.length}
+                        className="inline-flex items-center gap-1.5 px-4 py-[9px] rounded-lg text-[13px] font-medium text-[#1d1d1f] bg-white border border-[#d2d2d7] cursor-pointer"
+                      >
+                        {step3Running ? 'Building Groups Preview...' : 'Preview Groups Only'}
+                      </button>
+                    </div>
                   ) : null}
                 </div>
               </div>
@@ -1660,23 +1693,35 @@ export default function NewApp() {
             <div className="flex flex-col h-full animate-fadeIn">
               <div className="px-7 pt-5 shrink-0">
                 <div className="flex items-start justify-between gap-4 mb-4">
-                  <div>
-                    <div className="text-[22px] font-semibold text-[#1d1d1f] tracking-[-0.5px]">
-                      Final Grouping Output
+                    <div>
+                      <div className="text-[22px] font-semibold text-[#1d1d1f] tracking-[-0.5px]">
+                      {isGroupingPreviewOnly ? 'Groups Preview' : 'Final Grouping Output'}
+                      </div>
+                      <div className="text-[13px] text-[#6e6e73] mt-1">
+                      {isGroupingPreviewOnly
+                        ? 'Preview the candidate keyword groups before keyword assignment.'
+                        : 'Final keyword grouping table for the current filtered keyword set.'}
+                      </div>
                     </div>
-                    <div className="text-[13px] text-[#6e6e73] mt-1">
-                      Final keyword grouping table for the current filtered keyword set.
-                    </div>
-                  </div>
                   {expandedResult ? (
-                    <button
-                      type="button"
-                      onClick={handleGenerateGroupingPlan}
-                      disabled={step3Running || !savedFilteredKeywordRows.length}
-                      className="inline-flex items-center gap-1.5 px-4 py-[9px] rounded-lg text-[13px] font-medium text-white bg-[#0071e3] border-none cursor-pointer disabled:opacity-50"
-                    >
-                      {step3Running ? 'Generating Keyword Grouping...' : 'Generate Keyword Grouping'}
-                    </button>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => handleGenerateGroupingPlan(false)}
+                        disabled={step3Running || !savedFilteredKeywordRows.length}
+                        className="inline-flex items-center gap-1.5 px-4 py-[9px] rounded-lg text-[13px] font-medium text-white bg-[#0071e3] border-none cursor-pointer disabled:opacity-50"
+                      >
+                        {step3Running ? 'Generating Keyword Grouping...' : 'Generate Keyword Grouping'}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleGenerateGroupingPlan(true)}
+                        disabled={step3Running || !savedFilteredKeywordRows.length}
+                        className="inline-flex items-center gap-1.5 px-4 py-[9px] rounded-lg text-[13px] font-medium text-[#1d1d1f] bg-white border border-[#d2d2d7] cursor-pointer disabled:opacity-50"
+                      >
+                        {step3Running ? 'Building Groups Preview...' : 'Preview Groups Only'}
+                      </button>
+                    </div>
                   ) : null}
                 </div>
               </div>
@@ -1698,9 +1743,11 @@ export default function NewApp() {
                         </div>
                       </div>
                       <div className="rounded-xl border border-[#e8e8ed] bg-[#fafafa] p-4">
-                        <div className="text-[11px] uppercase tracking-[0.6px] text-[#8e8e93]">Covered Keywords</div>
+                        <div className="text-[11px] uppercase tracking-[0.6px] text-[#8e8e93]">
+                          {isGroupingPreviewOnly ? 'Preview Only' : 'Covered Keywords'}
+                        </div>
                         <div className="text-[22px] font-semibold text-[#1d1d1f] mt-1">
-                          {groupingFinalResult ? groupingFinalResult.result.covered_keyword_count : '-'}
+                          {groupingFinalResult ? (isGroupingPreviewOnly ? 'Yes' : groupingFinalResult.result.covered_keyword_count) : '-'}
                         </div>
                       </div>
                     </div>
@@ -1711,9 +1758,13 @@ export default function NewApp() {
                           <span className="text-[56px] mb-5 block" style={{ animation: 'float 3s ease-in-out infinite' }}>
                             🗂️
                           </span>
-                          <div className="text-[18px] font-medium text-[#1d1d1f] mb-1.5">Building final grouping...</div>
+                          <div className="text-[18px] font-medium text-[#1d1d1f] mb-1.5">
+                            {isGroupingPreviewOnly ? 'Building groups preview...' : 'Building final grouping...'}
+                          </div>
                           <div className="text-[13px] text-[#6e6e73] mb-6 leading-relaxed">
-                            Organizing keywords into URL groups and preparing the final table for <strong className="text-[#1d1d1f]">{formData.businessName || 'your project'}</strong>
+                            {isGroupingPreviewOnly
+                              ? <>Creating candidate keyword groups for <strong className="text-[#1d1d1f]">{formData.businessName || 'your project'}</strong> before keyword assignment</>
+                              : <>Organizing keywords into URL groups and preparing the final table for <strong className="text-[#1d1d1f]">{formData.businessName || 'your project'}</strong></>}
                           </div>
                           <div className="flex items-center gap-3 px-3.5 py-2.5 rounded-xl border bg-[#f0f5ff] border-[rgba(0,122,255,0.3)] text-left">
                             <div className="text-[18px] w-7 text-center shrink-0 leading-none">🔎</div>
@@ -1737,9 +1788,13 @@ export default function NewApp() {
                       <div className="rounded-2xl border border-[#e8e8ed] bg-white overflow-hidden">
                             <div className="flex items-center justify-between px-5 py-4 border-b border-[#e8e8ed] bg-[#fafafa]">
                               <div>
-                                <div className="text-[15px] font-semibold text-[#1d1d1f]">Final Grouping Output</div>
+                                <div className="text-[15px] font-semibold text-[#1d1d1f]">
+                                  {isGroupingPreviewOnly ? 'Groups Preview' : 'Final Grouping Output'}
+                                </div>
                                 <div className="text-[12px] text-[#6e6e73] mt-1">
-                                  CSV-ready output for the current filtered keyword pool.
+                                  {isGroupingPreviewOnly
+                                    ? 'Candidate keyword groups only. No keywords have been assigned yet.'
+                                    : 'CSV-ready output for the current filtered keyword pool.'}
                                 </div>
                               </div>
                               <div className="flex items-center gap-3">
@@ -1770,9 +1825,11 @@ export default function NewApp() {
                                   </div>
                                 </div>
                                 <div className="rounded-xl border border-[#e8e8ed] bg-[#fafafa] p-4">
-                                  <div className="text-[11px] uppercase tracking-[0.6px] text-[#8e8e93]">Covered Keywords</div>
+                                  <div className="text-[11px] uppercase tracking-[0.6px] text-[#8e8e93]">
+                                    {isGroupingPreviewOnly ? 'Preview Only' : 'Covered Keywords'}
+                                  </div>
                                   <div className="text-[22px] font-semibold text-[#1d1d1f] mt-1">
-                                    {groupingFinalResult.result.covered_keyword_count}
+                                    {isGroupingPreviewOnly ? groupingFinalResult.result.covered_keyword_count : groupingFinalResult.result.covered_keyword_count}
                                   </div>
                                 </div>
                                 <div className="rounded-xl border border-[#e8e8ed] bg-[#fafafa] p-4">
@@ -1791,7 +1848,9 @@ export default function NewApp() {
                                       <th className="px-4 py-3 text-[12px] font-semibold text-[#1d1d1f]">Intent</th>
                                       <th className="px-4 py-3 text-[12px] font-semibold text-[#1d1d1f]">Keyword Group</th>
                                       <th className="px-4 py-3 text-[12px] font-semibold text-[#1d1d1f]">URL Slug</th>
-                                      <th className="px-4 py-3 text-[12px] font-semibold text-[#1d1d1f]">Level 3 Variations</th>
+                                      <th className="px-4 py-3 text-[12px] font-semibold text-[#1d1d1f]">
+                                        {isGroupingPreviewOnly ? 'Keyword Assignment' : 'Level 3 Variations'}
+                                      </th>
                                     </tr>
                                   </thead>
                                   <tbody>
@@ -1804,7 +1863,21 @@ export default function NewApp() {
                                         <td className="px-4 py-3 text-[12px] text-[#0071e3] font-mono">{group.slug}</td>
                                         <td className="px-4 py-3 min-w-[420px]">
                                           <div className="text-[12px] leading-6 text-[#1d1d1f]">
-                                            {group.keywords.map((item, keywordIndex) => (
+                                            {isGroupingPreviewOnly ? (
+                                              group.keywords.length ? (
+                                                group.keywords.map((item, keywordIndex) => (
+                                                  <span key={`${group.slug}-${keywordIndex}`} className="mr-2 inline-block">
+                                                    <span>{item.keyword}</span>
+                                                    <span className="text-[#8e8e93]"> </span>
+                                                    <span className="inline-flex items-center rounded-[6px] border border-[#e8e8ed] bg-[#f7f7f9] px-1.5 py-0 text-[10px] font-medium leading-5 text-[#8e8e93]">
+                                                      {typeof item.search_volume === 'number' ? item.search_volume : '-'}
+                                                    </span>
+                                                  </span>
+                                                ))
+                                              ) : (
+                                                <span className="text-[#8e8e93]">Preview only - keywords not assigned yet</span>
+                                              )
+                                            ) : group.keywords.map((item, keywordIndex) => (
                                               <span key={`${group.slug}-${keywordIndex}`} className="mr-2 inline-block">
                                                 <span>{item.keyword}</span>
                                                 <span className="text-[#8e8e93]"> </span>
