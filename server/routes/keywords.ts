@@ -266,7 +266,7 @@ const MAX_GROUPING_FINAL_KEYWORDS_PER_BATCH = 1000;
 const MAX_PREVIEW_ASSIGNMENT_KEYWORDS_PER_BATCH = 100;
 const MAX_PREVIEW_ASSIGNMENT_ROUNDS = 2;
 const PREVIEW_ASSIGNMENT_TEMPERATURES = [0.2, 0.5];
-const PREVIEW_ASSIGNMENT_EMBEDDING_THRESHOLD = 0.9;
+const PREVIEW_ASSIGNMENT_EMBEDDING_THRESHOLD = 0.85;
 const PREVIEW_ASSIGNMENT_EMBEDDING_ENABLED =
   (process.env.KEYWORD_GROUPING_ENABLE_EMBEDDING_LEFTOVER_ASSIGNMENT || 'false').trim().toLowerCase() === 'true';
 const BLUEPRINT_NOISE_PATTERN =
@@ -642,19 +642,7 @@ function cosineSimilarity(a: number[], b: number[]): number {
 }
 
 function buildPreviewGroupEmbeddingDescriptors(groups: KeywordGroupingGroup[]): string[] {
-  return groups.map((group) => {
-    const sampleKeywords = group.keywords.slice(0, 10).map((keyword) => keyword.keyword).filter(Boolean);
-    return [
-      `product line: ${group.product_line}`,
-      `pillar: ${group.pillar}`,
-      `intent: ${group.intent}`,
-      `keyword group: ${group.keyword_group}`,
-      `slug: ${group.slug}`,
-      sampleKeywords.length ? `sample keywords: ${sampleKeywords.join(' ; ')}` : '',
-    ]
-      .filter(Boolean)
-      .join(' | ');
-  });
+  return groups.map((group) => `keyword group: ${group.keyword_group}`);
 }
 
 function parsePreviewAssignmentOutput(

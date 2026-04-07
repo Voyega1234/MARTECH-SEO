@@ -377,7 +377,7 @@ How it works:
 After the AI rounds finish:
 
 1. if `KEYWORD_GROUPING_ENABLE_EMBEDDING_LEFTOVER_ASSIGNMENT=true` and Gemini embeddings are available, leftovers go through one embedding-based recovery pass
-2. that pass only assigns keywords whose best cosine similarity is above `0.9`
+2. that pass only assigns keywords whose best cosine similarity is above `0.85`
 3. if the flag is off, or embeddings are unavailable, leftovers skip that pass
 4. anything still unmatched goes to `Needs Review / Ungrouped`
 
