@@ -90,9 +90,6 @@ Some parts of the repo are stable, some are experimental, and some were cleaned 
 - [prompt/Keyword_grouping_blueprint.md](/Users/waveconvertcake/Desktop/MARTECH-SEO/prompt/Keyword_grouping_blueprint.md)
 - [prompt/Keyword_grouping_preview_assignment.md](/Users/waveconvertcake/Desktop/MARTECH-SEO/prompt/Keyword_grouping_preview_assignment.md)
 - [prompt/Keyword_grouping_plan.md](/Users/waveconvertcake/Desktop/MARTECH-SEO/prompt/Keyword_grouping_plan.md)
-- [prompt/Keyword_grouping_groups.md](/Users/waveconvertcake/Desktop/MARTECH-SEO/prompt/Keyword_grouping_groups.md)
-- [prompt/Keyword_grouping_repair.md](/Users/waveconvertcake/Desktop/MARTECH-SEO/prompt/Keyword_grouping_repair.md)
-- [prompt/Keyword_grouping_merge_review.md](/Users/waveconvertcake/Desktop/MARTECH-SEO/prompt/Keyword_grouping_merge_review.md)
 - [prompt/Keyword_generator.md](/Users/waveconvertcake/Desktop/MARTECH-SEO/prompt/Keyword_generator.md)
 - [prompt/SeedKeyword_generator.md](/Users/waveconvertcake/Desktop/MARTECH-SEO/prompt/SeedKeyword_generator.md)
 - [prompt/Keyword_relevance_filter.md](/Users/waveconvertcake/Desktop/MARTECH-SEO/prompt/Keyword_relevance_filter.md)
@@ -258,8 +255,7 @@ Current flow:
 1. Build a grouping blueprint.
 2. Assign keywords into those approved groups.
 3. Re-check leftovers.
-4. Run embeddings on remaining leftovers only.
-5. Add `Needs Review / Ungrouped` for anything still unmatched.
+4. Add `Needs Review / Ungrouped` for anything still unmatched.
 
 ### Step 3 Builder
 
@@ -362,6 +358,7 @@ Current constants:
 
 - `MAX_PREVIEW_ASSIGNMENT_KEYWORDS_PER_BATCH = 100`
 - `MAX_PREVIEW_ASSIGNMENT_ROUNDS = 2`
+- `PREVIEW_ASSIGNMENT_TEMPERATURES = [0.2, 0.5]`
 
 How it works:
 
@@ -375,20 +372,20 @@ How it works:
    - remaining count no longer improves, or
    - 2 rounds are reached
 
-#### Embedding leftover pass
+#### Leftover handling
 
 After the AI rounds finish:
 
-1. remaining unmatched keywords are embedded
-2. approved group descriptors are embedded
-3. cosine similarity is computed
-4. leftover keywords are assigned only if score is above the threshold
+1. if `KEYWORD_GROUPING_ENABLE_EMBEDDING_LEFTOVER_ASSIGNMENT=true` and Gemini embeddings are available, leftovers go through one embedding-based recovery pass
+2. that pass only assigns keywords whose best cosine similarity is above `0.9`
+3. if the flag is off, or embeddings are unavailable, leftovers skip that pass
+4. anything still unmatched goes to `Needs Review / Ungrouped`
 
-Current threshold:
+Default:
 
-- `PREVIEW_ASSIGNMENT_EMBEDDING_THRESHOLD = 0.85`
+- `KEYWORD_GROUPING_ENABLE_EMBEDDING_LEFTOVER_ASSIGNMENT=false`
 
-This means embeddings are a cleanup pass, not the primary grouping method.
+This keeps debugging simpler by default, while still allowing the embedding fallback to be turned on without deleting code.
 
 #### Assignment input format
 
@@ -455,16 +452,17 @@ This means:
 - unassigned keywords are never silently dropped
 - they are surfaced explicitly in output
 
-## 11. Legacy Step 3 Structured Flow
+## 11. Step 3 Planning Utility
 
 Relevant endpoints:
 
 - `POST /api/keywords/grouping-plan`
-- `POST /api/keywords/grouping-final`
 
-This older structured flow still exists in the codebase, but it is no longer the active main grouping path for job execution or `grouping-final`.
+`grouping-plan` is still available as a standalone planning utility for inspecting possible product lines and pillars.
 
-### Legacy grouping plan
+The old `groups / repair / merge-review` Step 3 path has been removed from the active codebase.
+
+### Grouping plan
 
 Prompt:
 
@@ -477,34 +475,6 @@ Goal:
 Schema:
 
 - `getKeywordGroupingPlanJsonSchema()`
-
-### Legacy grouping batches
-
-Prompt:
-
-- [prompt/Keyword_grouping_groups.md](/Users/waveconvertcake/Desktop/MARTECH-SEO/prompt/Keyword_grouping_groups.md)
-
-Schema:
-
-- `getKeywordGroupingBatchJsonSchema()`
-
-Flow:
-
-1. chunk keywords
-2. group each batch into `groups`
-3. parse and validate
-4. repair malformed batches if needed
-5. merge all batches
-6. repair `Needs Review` groups
-7. merge similar groups
-8. enforce keyword coverage again
-
-Supporting prompts:
-
-- [prompt/Keyword_grouping_repair.md](/Users/waveconvertcake/Desktop/MARTECH-SEO/prompt/Keyword_grouping_repair.md)
-- [prompt/Keyword_grouping_merge_review.md](/Users/waveconvertcake/Desktop/MARTECH-SEO/prompt/Keyword_grouping_merge_review.md)
-
-Treat this as legacy/reference logic unless you are explicitly reviving it.
 
 ## 12. PAA Blog Flow
 

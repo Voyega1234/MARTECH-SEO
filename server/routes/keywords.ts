@@ -266,7 +266,9 @@ const MAX_GROUPING_FINAL_KEYWORDS_PER_BATCH = 1000;
 const MAX_PREVIEW_ASSIGNMENT_KEYWORDS_PER_BATCH = 100;
 const MAX_PREVIEW_ASSIGNMENT_ROUNDS = 2;
 const PREVIEW_ASSIGNMENT_TEMPERATURES = [0.2, 0.5];
-const PREVIEW_ASSIGNMENT_EMBEDDING_THRESHOLD = 0.85;
+const PREVIEW_ASSIGNMENT_EMBEDDING_THRESHOLD = 0.9;
+const PREVIEW_ASSIGNMENT_EMBEDDING_ENABLED =
+  (process.env.KEYWORD_GROUPING_ENABLE_EMBEDDING_LEFTOVER_ASSIGNMENT || 'false').trim().toLowerCase() === 'true';
 const BLUEPRINT_NOISE_PATTERN =
   /(wallpaper|background|photo|photography|image|images|png|jpg|jpeg|gif|vector|clipart|3d warehouse|3d model|cad\b|dwg\b|sketchup|free download|template|mockup)/i;
 const BLUEPRINT_LOW_VALUE_GROUP_PATTERN =
@@ -543,9 +545,7 @@ function buildPreviewGroupsFromBlueprint(
   const usedSlugs = new Set<string>();
   const usedNames = new Set<string>();
   const skipPostProcessing = options?.skipPostProcessing === true;
-
-  return rawGroups
-    .map((group: any) => {
+  const nextGroups: Array<KeywordGroupingGroup | null> = rawGroups.map((group: any) => {
       const productLine = String(group?.product_line || '').trim();
       const pillar = String(group?.topic_pillar || '').trim();
       const intent = String(group?.intent || '').trim().toUpperCase() as PillarIntent;
@@ -583,8 +583,9 @@ function buildPreviewGroupsFromBlueprint(
         slug: uniqueSlug,
         keywords: [],
       } satisfies KeywordGroupingGroup;
-    })
-    .filter((group): group is KeywordGroupingGroup => Boolean(group));
+    });
+
+  return nextGroups.filter((group): group is KeywordGroupingGroup => group !== null);
 }
 
 function buildPreviewAssignmentUserMessage(
@@ -663,7 +664,10 @@ function parsePreviewAssignmentOutput(
 ): KeywordGroupingGroup[] {
   const parsed = JSON.parse(extractJsonObject(raw));
   const assignments = Array.isArray(parsed?.assignments) ? parsed.assignments : [];
-  const nextGroups = groups.map((group) => ({ ...group, keywords: [...group.keywords] }));
+  const nextGroups: KeywordGroupingGroup[] = groups.map((group) => ({
+    ...group,
+    keywords: [...group.keywords],
+  }));
   const assignedKeywordIndexes = new Set<number>();
 
   for (const item of assignments) {
@@ -701,7 +705,10 @@ async function assignKeywordsToPreviewGroups(
     provider: 'anthropic',
     model: 'claude-sonnet-4-6',
   };
-  let assignedGroups = groups.map((group) => ({ ...group, keywords: [] }));
+  let assignedGroups: KeywordGroupingGroup[] = groups.map((group) => ({
+    ...group,
+    keywords: [],
+  }));
   const debugDir = path.join('/tmp', 'martech-seo-debug');
   fs.mkdirSync(debugDir, { recursive: true });
   const assignmentDebugPath = path.join(debugDir, 'preview-group-assignment-last-request.json');
@@ -827,7 +834,7 @@ async function assignKeywordsToPreviewGroups(
   fs.writeFileSync(assignmentDebugPath, JSON.stringify(requestLog, null, 2), 'utf-8');
   fs.writeFileSync(assignmentResponseDebugPath, JSON.stringify(responseLog, null, 2), 'utf-8');
 
-  if (remainingKeywords.length && isGeminiEmbeddingsEnabled()) {
+  if (remainingKeywords.length && PREVIEW_ASSIGNMENT_EMBEDDING_ENABLED && isGeminiEmbeddingsEnabled()) {
     const groupDescriptors = buildPreviewGroupEmbeddingDescriptors(assignedGroups);
     const [keywordEmbeddings, groupEmbeddings] = await Promise.all([
       embedTextsWithGemini(remainingKeywords.map((keyword) => keyword.keyword)),
@@ -860,11 +867,11 @@ async function assignKeywordsToPreviewGroups(
     }
 
     rawParts.push(
-      `Embedding Leftover Pass\nthreshold=${PREVIEW_ASSIGNMENT_EMBEDDING_THRESHOLD}\nremaining_before=${remainingKeywords.length}\nassigned=${embeddingAssignedCount}\nremaining_after=${remainingKeywords.length - embeddingAssignedCount}`
+      `Embedding Leftover Pass\nstatus=enabled\nthreshold=${PREVIEW_ASSIGNMENT_EMBEDDING_THRESHOLD}\nremaining_before=${remainingKeywords.length}\nassigned=${embeddingAssignedCount}\nremaining_after=${remainingKeywords.length - embeddingAssignedCount}`
     );
   } else if (remainingKeywords.length) {
     rawParts.push(
-      `Embedding Leftover Pass\nthreshold=${PREVIEW_ASSIGNMENT_EMBEDDING_THRESHOLD}\nskipped=embeddings_disabled\nremaining_before=${remainingKeywords.length}`
+      `Embedding Leftover Pass\nstatus=disabled\nremaining_before=${remainingKeywords.length}`
     );
   }
 

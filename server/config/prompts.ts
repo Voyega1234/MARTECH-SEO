@@ -25,10 +25,6 @@ export function getKeywordGroupingPlanPrompt(): string {
   return loadPrompt('Keyword_grouping_plan.md');
 }
 
-export function getKeywordGroupingGroupsPrompt(): string {
-  return loadPrompt('Keyword_grouping_groups.md');
-}
-
 export function getKeywordGroupingBlueprintPrompt(): string {
   return loadPrompt('Keyword_grouping_blueprint.md');
 }
@@ -39,14 +35,6 @@ export function getKeywordGroupingPreviewAssignmentPrompt(): string {
 
 export function getKeywordRelevanceFilterPrompt(): string {
   return loadPrompt('Keyword_relevance_filter.md');
-}
-
-export function getKeywordGroupingRepairPrompt(): string {
-  return loadPrompt('Keyword_grouping_repair.md');
-}
-
-export function getKeywordGroupingMergeReviewPrompt(): string {
-  return loadPrompt('Keyword_grouping_merge_review.md');
 }
 
 export function getPaaBlogSeedSelectionPrompt(): string {
