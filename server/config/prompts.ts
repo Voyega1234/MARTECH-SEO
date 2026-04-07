@@ -33,24 +33,8 @@ export function getKeywordGroupingBlueprintPrompt(): string {
   return loadPrompt('Keyword_grouping_blueprint.md');
 }
 
-export function getKeywordGroupingPreviewClustersPrompt(): string {
-  return loadPrompt('Keyword_grouping_preview_clusters.md');
-}
-
-export function getKeywordGroupingPreviewClusterNamesPrompt(): string {
-  return loadPrompt('Keyword_grouping_preview_cluster_names.md');
-}
-
 export function getKeywordGroupingPreviewAssignmentPrompt(): string {
   return loadPrompt('Keyword_grouping_preview_assignment.md');
-}
-
-export function getKeywordGroupingPreviewValidationPrompt(): string {
-  return loadPrompt('Keyword_grouping_preview_validation.md');
-}
-
-export function getKeywordGroupingNamesPrompt(): string {
-  return loadPrompt('Keyword_grouping_names.md');
 }
 
 export function getKeywordRelevanceFilterPrompt(): string {

@@ -1854,7 +1854,9 @@ export default function NewApp() {
                                     </tr>
                                   </thead>
                                   <tbody>
-                                    {groupingFinalResult.result.groups.map((group, index) => (
+                                    {groupingFinalResult.result.groups
+                                      .filter((group) => group.keywords.length > 0)
+                                      .map((group, index) => (
                                       <tr key={`${group.slug}-${index}`} className="border-b border-[#f1f1f4] align-top">
                                         <td className="px-4 py-3 text-[12px] text-[#1d1d1f]">{group.product_line}</td>
                                         <td className="px-4 py-3 text-[12px] text-[#1d1d1f]">{group.pillar}</td>

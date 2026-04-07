@@ -3,23 +3,16 @@ import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { runAgent, streamAgent, AgentError, generateOnly } from '../services/agent.ts';
-import { embedTextsWithGemini, isGeminiEmbeddingsEnabled } from '../services/geminiEmbeddings.ts';
 import {
   generateOnlyWithGemini,
-  getKeywordGroupingPreviewAssignmentModelSelection,
   getKeywordGroupingPreviewModelSelection,
 } from '../services/geminiText.ts';
+import { embedTextsWithGemini, isGeminiEmbeddingsEnabled } from '../services/geminiEmbeddings.ts';
 import {
   getKeywordGroupingBlueprintPrompt,
-  getKeywordGroupingPreviewClusterNamesPrompt,
-  getKeywordGroupingPreviewClustersPrompt,
   getKeywordGroupingPreviewAssignmentPrompt,
-  getKeywordGroupingPreviewValidationPrompt,
   getKeywordGeneratorPrompt,
-  getKeywordGroupingGroupsPrompt,
-  getKeywordGroupingMergeReviewPrompt,
   getKeywordGroupingPlanPrompt,
-  getKeywordGroupingRepairPrompt,
   getKeywordRelevanceFilterPrompt,
   getPaaBlogIdeasPrompt,
   getPaaBlogSeedSelectionPrompt,
@@ -41,25 +34,13 @@ import {
   type PaaSeedPlan,
 } from '../../shared/paaBlog.ts';
 import {
-  applyKeywordGroupingMerges,
-  buildFallbackKeywordGroupingBatchResult,
   ensureKeywordGroupingCoverage,
-  extractNeedsReviewKeywords,
-  mergeKeywordGroupingBatchResults,
-  mergeRepairGroupsIntoResults,
-  parseAndValidateKeywordGroupingBatchOutput,
   renderKeywordGroupingCsv,
   type KeywordGroupingGroup,
-  type KeywordGroupingMergeInstruction,
 } from '../../shared/keywordGroupingOutput.ts';
 import {
-  getKeywordGroupingBatchJsonSchema,
   getKeywordGroupingBlueprintJsonSchema,
-  getKeywordGroupingPreviewClusterNamesJsonSchema,
-  getKeywordGroupingPreviewClustersJsonSchema,
   getKeywordGroupingPreviewAssignmentJsonSchema,
-  getKeywordGroupingPreviewValidationJsonSchema,
-  getKeywordGroupingMergeReviewJsonSchema,
   getKeywordGroupingPlanJsonSchema,
   getKeywordRelevanceFilterJsonSchema,
   getPaaBlogIdeasJsonSchema,
@@ -282,8 +263,10 @@ type RelevanceKeywordInput = GroupingKeywordInput;
 const RELEVANCE_FILTER_BATCH_SIZE = 500;
 const RELEVANCE_FILTER_MODEL = process.env.CLAUDE_RELEVANCE_MODEL || 'claude-haiku-4-5';
 const MAX_GROUPING_FINAL_KEYWORDS_PER_BATCH = 1000;
-const MAX_PREVIEW_ASSIGNMENT_KEYWORDS_PER_BATCH = 400;
-const MAX_PREVIEW_VALIDATION_GROUPS_PER_BATCH = 12;
+const MAX_PREVIEW_ASSIGNMENT_KEYWORDS_PER_BATCH = 100;
+const MAX_PREVIEW_ASSIGNMENT_ROUNDS = 2;
+const PREVIEW_ASSIGNMENT_TEMPERATURES = [0.2, 0.5];
+const PREVIEW_ASSIGNMENT_EMBEDDING_THRESHOLD = 0.85;
 const BLUEPRINT_NOISE_PATTERN =
   /(wallpaper|background|photo|photography|image|images|png|jpg|jpeg|gif|vector|clipart|3d warehouse|3d model|cad\b|dwg\b|sketchup|free download|template|mockup)/i;
 const BLUEPRINT_LOW_VALUE_GROUP_PATTERN =
@@ -436,57 +419,6 @@ function parseRelevantIndexes(raw: string, batchSize: number): number[] {
   return [...deduped].sort((a, b) => a - b);
 }
 
-function buildGroupingFinalUserMessage(
-  formData: Record<string, any>,
-  plan: KeywordGroupingPlan,
-  keywords: GroupingKeywordInput[],
-  existingGroupsSummary?: string
-): string {
-  const parts: string[] = [];
-  parts.push(`Business Name: ${formData.businessName || 'N/A'}`);
-  parts.push(`Website URL: ${formData.websiteUrl || 'N/A'}`);
-  parts.push(`Business Description & Core Offerings: ${formData.businessDescription || 'N/A'}`);
-  parts.push(`SEO Goals & Conversion Action: ${formData.seoGoals || 'N/A'}`);
-  if (formData.mustRankKeywords?.length) {
-    parts.push(`Priority Keywords:\n${formData.mustRankKeywords.map((k: string) => `- ${k}`).join('\n')}`);
-  }
-  if (formData.focusProductLines?.length) {
-    parts.push(`Focus Product Lines:\n${formData.focusProductLines.map((p: string) => `- ${p}`).join('\n')}`);
-  }
-
-  parts.push(
-    `Approved Grouping Plan IDs:\n${plan.product_lines
-      .map(
-        (productLine, productLineIndex) =>
-          `PL${productLineIndex}: ${productLine.name}\n${productLine.pillars
-            .map((pillar, pillarIndex) => `  PI${pillarIndex}: ${pillar.name} (${pillar.intent})`)
-            .join('\n')}`
-      )
-      .join('\n')}`
-  );
-  parts.push('CRITICAL: use ONLY PL/PI ids from the approved plan. Do not output product line or pillar names.');
-
-  const keywordLines = keywords.map((item, keywordIndex) => {
-    const volume = typeof item.search_volume === 'number' ? item.search_volume : '-';
-    return `- K${keywordIndex}: ${item.keyword} | ${volume}`;
-  });
-  parts.push(`Keyword Batch IDs (${keywords.length} keywords):\n${keywordLines.join('\n')}`);
-  if (existingGroupsSummary) {
-    parts.push(`Existing Groups Summary:\n${existingGroupsSummary}`);
-    parts.push('Use this summary to understand what earlier groups already cover. Prefer merging into an existing URL-level intent when one strong page can satisfy the new keywords. Do not create a new group if an existing group already represents the same page intent.');
-  }
-  parts.push('CRITICAL: output ONLY keyword indexes in the "k" array. Do not output keyword text.');
-  return parts.join('\n\n');
-}
-
-function buildGroupingRepairUserMessage(
-  formData: Record<string, any>,
-  plan: KeywordGroupingPlan,
-  keywords: GroupingKeywordInput[]
-): string {
-  return buildGroupingFinalUserMessage(formData, plan, keywords);
-}
-
 function buildGroupingBlueprintUserMessage(
   formData: Record<string, any>,
   keywords: GroupingKeywordInput[]
@@ -504,14 +436,12 @@ function buildGroupingBlueprintUserMessage(
   }
   parts.push('Target Market: Thailand');
   parts.push('Naming Rule: Prefer Thai market naming by default. Use English only when the demand is clearly English-led or the English term is commonly used in Thailand as-is.');
-  parts.push('Preview Goal: identify reusable SEO topic URLs from real search demand, not internal corporate/support pages unless the keyword demand clearly supports them.');
-  parts.push('Grouping Rule: do not split every numeric or model variant into its own group unless the keyword list clearly shows repeated, meaningful demand for that exact variant.');
+  parts.push('Preview Goal: identify reusable SEO topic URLs from real search demand, guided by business scope and SEO objectives.');
   const keywordLines = keywords.map((item) => {
     const volume = typeof item.search_volume === 'number' ? item.search_volume : '-';
     return `- ${item.keyword} | ${volume}`;
   });
   parts.push(`Keyword Demand Landscape (${keywords.length} keywords):\n${keywordLines.join('\n')}`);
-  parts.push('Create candidate keyword groups only. Do not assign keywords to groups yet.');
 
   return parts.join('\n\n');
 }
@@ -527,232 +457,78 @@ function buildGroupingBlueprintKeywords(keywords: GroupingKeywordInput[]): Group
     });
 }
 
-type PreviewKeywordClusterDraft = {
-  id: number;
-  keywords: Array<{ keyword: string; search_volume: number | '-' }>;
-};
-
-function buildPreviewClusterUserMessage(
-  formData: Record<string, any>,
-  keywords: GroupingKeywordInput[]
-): string {
-  const parts: string[] = [];
-  parts.push(`Business Name: ${formData.businessName || 'N/A'}`);
-  parts.push(`Business Description & Core Offerings: ${formData.businessDescription || 'N/A'}`);
-  parts.push('Target Market: Thailand');
-  const keywordLines = keywords.map((item, index) => {
-    const volume = typeof item.search_volume === 'number' ? item.search_volume : '-';
-    return `- K${index}: ${item.keyword} | ${volume}`;
-  });
-  parts.push(`Keyword Pool (${keywords.length} keywords):\n${keywordLines.join('\n')}`);
-  return parts.join('\n\n');
-}
-
-function parsePreviewClusterOutput(
-  raw: string,
-  keywords: GroupingKeywordInput[]
-): { clusters: PreviewKeywordClusterDraft[]; unassignedKeywords: GroupingKeywordInput[] } {
-  const parsed = JSON.parse(extractJsonObject(raw));
-  const rawClusters = Array.isArray(parsed?.clusters) ? parsed.clusters : [];
-  const seenKeywordIndexes = new Set<number>();
-  const clusters: PreviewKeywordClusterDraft[] = [];
-
-  rawClusters.forEach((cluster: any, clusterIndex: number) => {
-    const keywordIndexes = Array.isArray(cluster?.k)
-      ? cluster.k
-          .map((value: unknown) => Number(value))
-          .filter(
-            (value: number) =>
-              Number.isInteger(value)
-              && value >= 0
-              && value < keywords.length
-              && !seenKeywordIndexes.has(value)
-          )
-      : [];
-
-    if (!keywordIndexes.length) return;
-    keywordIndexes.forEach((value) => seenKeywordIndexes.add(value));
-
-    clusters.push({
-      id: clusterIndex,
-      keywords: keywordIndexes.map((keywordIndex) => ({
-        keyword: keywords[keywordIndex].keyword.trim(),
-        search_volume:
-          typeof keywords[keywordIndex].search_volume === 'number'
-            ? keywords[keywordIndex].search_volume
-            : '-',
-      })),
-    });
-  });
-
-  const unassignedKeywords = keywords.filter((_, keywordIndex) => !seenKeywordIndexes.has(keywordIndex));
-  return { clusters, unassignedKeywords };
-}
-
-function buildPreviewClusterNamesUserMessage(
-  formData: Record<string, any>,
-  clusters: PreviewKeywordClusterDraft[]
-): string {
-  const parts: string[] = [];
-  parts.push(`Business Name: ${formData.businessName || 'N/A'}`);
-  parts.push(`Business Description & Core Offerings: ${formData.businessDescription || 'N/A'}`);
-  parts.push('Target Market: Thailand');
-  parts.push(
-    `Draft Keyword Clusters (${clusters.length}):\n${clusters
-      .map((cluster) => {
-        const keywordPreview = cluster.keywords
-          .slice(0, 12)
-          .map((keyword) => `${keyword.keyword} | ${keyword.search_volume}`)
-          .join(' ; ');
-        return `- C${cluster.id}: ${keywordPreview}`;
-      })
-      .join('\n')}`
-  );
-  return parts.join('\n\n');
-}
-
-function buildPreviewGroupsFromNamedClusters(
-  raw: string,
-  clusters: PreviewKeywordClusterDraft[]
-): KeywordGroupingGroup[] {
-  const parsed = JSON.parse(extractJsonObject(raw));
-  const rawGroups = Array.isArray(parsed?.groups) ? parsed.groups : [];
-  const clusterMap = new Map(clusters.map((cluster) => [cluster.id, cluster]));
-  const usedSlugs = new Set<string>();
-  const usedNames = new Set<string>();
-
-  return rawGroups
-    .map((group: any) => {
-      const clusterId = Number(group?.id);
-      const cluster = clusterMap.get(clusterId);
-      if (!cluster) return null;
-
-      const productLine = String(group?.product_line || '').trim();
-      const pillar = String(group?.topic_pillar || '').trim();
-      const intent = String(group?.intent || '').trim().toUpperCase() as PillarIntent;
-      const keywordGroup = String(group?.keyword_group || '').trim();
-      const slug = String(group?.slug || '').trim();
-
-      if (!productLine || !pillar || !keywordGroup || !slug) return null;
-      if (!['T', 'C', 'I', 'N'].includes(intent)) return null;
-      if (isBlueprintNoiseGroup(keywordGroup, slug)) return null;
-
-      const nameKey = `${productLine.toLowerCase()}::${pillar.toLowerCase()}::${keywordGroup.toLowerCase()}`;
-      if (usedNames.has(nameKey)) return null;
-
-      let normalizedSlug = slug.startsWith('/') ? slug : `/${slug}`;
-      if (!normalizedSlug.endsWith('/')) normalizedSlug = `${normalizedSlug}/`;
-      const baseSlug = normalizedSlug.replace(/\/+$/, '') || '/group';
-      let uniqueSlug = `${baseSlug}/`;
-      let suffix = 2;
-      while (usedSlugs.has(uniqueSlug)) {
-        uniqueSlug = `${baseSlug}-${suffix}/`;
-        suffix += 1;
-      }
-
-      usedSlugs.add(uniqueSlug);
-      usedNames.add(nameKey);
-
-      return {
-        product_line: productLine,
-        pillar,
-        intent,
-        keyword_group: keywordGroup,
-        slug: uniqueSlug,
-        keywords: [...cluster.keywords],
-      } satisfies KeywordGroupingGroup;
-    })
-    .filter((group): group is KeywordGroupingGroup => Boolean(group));
-}
-
 async function generateGroupingBlueprint(
   formData: Record<string, any>,
   keywords: GroupingKeywordInput[]
 ): Promise<{ groups: KeywordGroupingGroup[]; raw: string }> {
-  const clusterPrompt = getKeywordGroupingPreviewClustersPrompt();
-  const namingPrompt = getKeywordGroupingPreviewClusterNamesPrompt();
+  const blueprintPrompt = getKeywordGroupingBlueprintPrompt();
   const blueprintKeywords = buildGroupingBlueprintKeywords(keywords);
-  const clusterUserMessage = buildPreviewClusterUserMessage(formData, blueprintKeywords);
-  const clusterModel = {
-    provider: 'gemini' as const,
-    model: process.env.KEYWORD_GROUPING_PREVIEW_CLUSTER_MODEL?.trim() || 'gemini-3.1-pro-preview',
-  };
-  const namingModel = getKeywordGroupingPreviewModelSelection();
+  const userMessage = buildGroupingBlueprintUserMessage(formData, blueprintKeywords);
+  const previewModel = getKeywordGroupingPreviewModelSelection();
   const previewTemperature = 1;
   const debugDir = path.join('/tmp', 'martech-seo-debug');
   fs.mkdirSync(debugDir, { recursive: true });
-  const clusterDebugPath = path.join(debugDir, 'preview-group-cluster-last-request.json');
+  const builderDebugPath = path.join(debugDir, 'preview-group-builder-last-request.json');
+  const builderResponseDebugPath = path.join(debugDir, 'preview-group-builder-last-response.json');
   fs.writeFileSync(
-    clusterDebugPath,
+    builderDebugPath,
     JSON.stringify(
       {
-        stage: 'cluster',
-        provider: clusterModel.provider,
-        model: clusterModel.model,
+        stage: 'builder',
+        provider: previewModel.provider,
+        model: previewModel.model,
         temperature: previewTemperature,
+        business_context_included: true,
         keyword_count: blueprintKeywords.length,
-        system_prompt: clusterPrompt,
-        user_message: clusterUserMessage,
+        system_prompt: blueprintPrompt,
+        user_message: userMessage,
       },
       null,
       2
     ),
     'utf-8'
   );
-  const clusterResult = await generateOnlyWithGemini(clusterPrompt, clusterUserMessage, {
-    model: clusterModel.model,
-    jsonSchema: getKeywordGroupingPreviewClustersJsonSchema(),
-    temperature: previewTemperature,
-  });
-  const { clusters, unassignedKeywords } = parsePreviewClusterOutput(clusterResult.result, blueprintKeywords);
-
-  const namingUserMessage = buildPreviewClusterNamesUserMessage(formData, clusters);
-  const namingDebugPath = path.join(debugDir, 'preview-group-naming-last-request.json');
+  const builderResult =
+    previewModel.provider === 'gemini'
+      ? await generateOnlyWithGemini(blueprintPrompt, userMessage, {
+          model: previewModel.model,
+          jsonSchema: getKeywordGroupingBlueprintJsonSchema(),
+          temperature: previewTemperature,
+        })
+      : await generateOnly(blueprintPrompt, userMessage, {
+          model: previewModel.model,
+          jsonSchema: getKeywordGroupingBlueprintJsonSchema(),
+        });
   fs.writeFileSync(
-    namingDebugPath,
+    builderResponseDebugPath,
     JSON.stringify(
       {
-        stage: 'naming',
-        provider: namingModel.provider,
-        model: namingModel.model,
-        cluster_count: clusters.length,
-        system_prompt: namingPrompt,
-        user_message: namingUserMessage,
+        stage: 'builder',
+        provider: previewModel.provider,
+        model: previewModel.model,
+        temperature: previewTemperature,
+        business_context_included: true,
+        raw_result: builderResult.result,
       },
       null,
       2
     ),
     'utf-8'
   );
-  const namingResult =
-    namingModel.provider === 'gemini'
-      ? await generateOnlyWithGemini(namingPrompt, namingUserMessage, {
-          model: namingModel.model,
-          jsonSchema: getKeywordGroupingPreviewClusterNamesJsonSchema(),
-        })
-      : await generateOnly(namingPrompt, namingUserMessage, {
-          model: namingModel.model,
-          jsonSchema: getKeywordGroupingPreviewClusterNamesJsonSchema(),
-        });
-
-  let groups = buildPreviewGroupsFromNamedClusters(namingResult.result, clusters);
-  if (unassignedKeywords.length) {
-    groups = ensureKeywordGroupingCoverage(groups, blueprintKeywords);
-  }
+  const groups = buildPreviewGroupsFromBlueprint(builderResult.result);
 
   return {
     groups,
     raw:
-      `cluster_provider=${clusterModel.provider}\ncluster_model=${clusterModel.model}\n` +
-      `cluster_temperature=${previewTemperature}\n` +
-      `cluster_debug_file=${clusterDebugPath}\n` +
-      `cluster_count=${clusters.length}\n` +
-      `cluster_unassigned_count=${unassignedKeywords.length}\n` +
-      `naming_provider=${namingModel.provider}\n` +
-      `naming_model=${namingModel.model}\n` +
-      `naming_debug_file=${namingDebugPath}\n\n` +
-      `Draft Clusters\n${clusterResult.result}\n\n` +
-      `Named Groups\n${namingResult.result}`,
+      `provider=${previewModel.provider}\n` +
+      `model=${previewModel.model}\n` +
+      `temperature=${previewTemperature}\n` +
+      `business_context_included=true\n` +
+      `planning_keyword_count=${blueprintKeywords.length}\n` +
+      `draft_group_count=${groups.length}\n` +
+      `builder_debug_file=${builderDebugPath}\n` +
+      `builder_response_debug_file=${builderResponseDebugPath}\n\n` +
+      `Blueprint\n${builderResult.result}`,
   };
 }
 
@@ -812,7 +588,7 @@ function buildPreviewGroupsFromBlueprint(
 }
 
 function buildPreviewAssignmentUserMessage(
-  formData: Record<string, any>,
+  _formData: Record<string, any>,
   groups: KeywordGroupingGroup[],
   keywords: GroupingKeywordInput[],
   options?: {
@@ -821,16 +597,12 @@ function buildPreviewAssignmentUserMessage(
   }
 ): string {
   const parts: string[] = [];
-  parts.push(`Business Name: ${formData.businessName || 'N/A'}`);
-  parts.push(`Business Description & Core Offerings: ${formData.businessDescription || 'N/A'}`);
   parts.push('Target Market: Thailand');
   parts.push(
     `Approved Preview Groups (${groups.length}):\n${groups
       .map((group, index) => {
-        const sampleKeywords = group.keywords.slice(0, 5).map((keyword) => keyword.keyword).filter(Boolean);
-        const sampleSuffix = sampleKeywords.length
-          ? ` | sample keywords: ${sampleKeywords.join(' ; ')}`
-          : '';
+        const sampleKeywords = group.keywords.slice(0, 10).map((keyword) => keyword.keyword).filter(Boolean);
+        const sampleSuffix = sampleKeywords.length ? ` | sample keywords: ${sampleKeywords.join(' ; ')}` : '';
         return `- G${index}: ${group.product_line} | ${group.pillar} | ${group.intent} | ${group.keyword_group} | ${group.slug}${sampleSuffix}`;
       })
       .join('\n')}`
@@ -845,10 +617,43 @@ function buildPreviewAssignmentUserMessage(
   }
   parts.push(
     options?.assignmentInstruction?.trim()
-      || 'Assign each keyword to the single best matching group only when the fit is clear. Leave unmatched keywords unassigned.'
+      || 'Assign each keyword to the single best existing group when there is one reasonable page-fit. Leave it unassigned only when no approved group is a reasonable fit.'
   );
 
   return parts.join('\n\n');
+}
+
+function cosineSimilarity(a: number[], b: number[]): number {
+  let dot = 0;
+  let normA = 0;
+  let normB = 0;
+
+  for (let index = 0; index < a.length; index += 1) {
+    const aValue = a[index] || 0;
+    const bValue = b[index] || 0;
+    dot += aValue * bValue;
+    normA += aValue * aValue;
+    normB += bValue * bValue;
+  }
+
+  if (!normA || !normB) return -1;
+  return dot / (Math.sqrt(normA) * Math.sqrt(normB));
+}
+
+function buildPreviewGroupEmbeddingDescriptors(groups: KeywordGroupingGroup[]): string[] {
+  return groups.map((group) => {
+    const sampleKeywords = group.keywords.slice(0, 10).map((keyword) => keyword.keyword).filter(Boolean);
+    return [
+      `product line: ${group.product_line}`,
+      `pillar: ${group.pillar}`,
+      `intent: ${group.intent}`,
+      `keyword group: ${group.keyword_group}`,
+      `slug: ${group.slug}`,
+      sampleKeywords.length ? `sample keywords: ${sampleKeywords.join(' ; ')}` : '',
+    ]
+      .filter(Boolean)
+      .join(' | ');
+  });
 }
 
 function parsePreviewAssignmentOutput(
@@ -886,336 +691,76 @@ function parsePreviewAssignmentOutput(
   return nextGroups;
 }
 
-function buildPreviewValidationUserMessage(
-  formData: Record<string, any>,
-  batchGroups: Array<{ groupIndex: number; group: KeywordGroupingGroup }>
-): string {
-  const parts: string[] = [];
-  parts.push(`Business Name: ${formData.businessName || 'N/A'}`);
-  parts.push(`Business Description & Core Offerings: ${formData.businessDescription || 'N/A'}`);
-  parts.push('Target Market: Thailand');
-  parts.push(
-    `Assigned Preview Groups To Review (${batchGroups.length}):\n${batchGroups
-      .map(({ groupIndex, group }) => {
-        const keywordLines = group.keywords
-          .map((keyword, keywordIndex) => `  - K${keywordIndex}: ${keyword.keyword} | ${keyword.search_volume}`)
-          .join('\n');
-        return `- G${groupIndex}: ${group.product_line} | ${group.pillar} | ${group.intent} | ${group.keyword_group} | ${group.slug}\n${keywordLines}`;
-      })
-      .join('\n')}`
-  );
-  parts.push('Keep only the keywords that truly belong on the same URL as the group topic. Remove weak or mixed-intent fits.');
-
-  return parts.join('\n\n');
-}
-
-function parsePreviewValidationOutput(
-  raw: string,
-  groups: KeywordGroupingGroup[],
-  batchGroups: Array<{ groupIndex: number; group: KeywordGroupingGroup }>
-): KeywordGroupingGroup[] {
-  const parsed = JSON.parse(extractJsonObject(raw));
-  const reviews = Array.isArray(parsed?.reviews) ? parsed.reviews : [];
-  const nextGroups = groups.map((group) => ({ ...group, keywords: [...group.keywords] }));
-
-  for (const item of reviews) {
-    const groupIndex = Number(item?.g);
-    const batchGroup = batchGroups.find((entry) => entry.groupIndex === groupIndex);
-    if (!batchGroup || !Number.isInteger(groupIndex) || groupIndex < 0 || groupIndex >= nextGroups.length) continue;
-
-    const keepIndexes = new Set(
-      (Array.isArray(item?.keep) ? item.keep : [])
-        .map((value: unknown) => Number(value))
-        .filter(
-          (value: number) =>
-            Number.isInteger(value) && value >= 0 && value < batchGroup.group.keywords.length
-        )
-    );
-
-    nextGroups[groupIndex].keywords = batchGroup.group.keywords.filter((_, keywordIndex) => keepIndexes.has(keywordIndex));
-  }
-
-  return nextGroups;
-}
-
-function normalizePreviewAssignmentKey(value: string): string {
-  return value.trim().toLowerCase().replace(/\s+/g, ' ');
-}
-
-function tokenizePreviewAssignmentText(value: string): string[] {
-  return normalizePreviewAssignmentKey(value)
-    .split(/[^0-9a-zA-Z\u0E00-\u0E7F]+/)
-    .map((token) => token.trim())
-    .filter((token) => token.length >= 2);
-}
-
-function cosineSimilarity(a: number[], b: number[]): number {
-  let dot = 0;
-  let normA = 0;
-  let normB = 0;
-
-  for (let index = 0; index < a.length; index += 1) {
-    const aValue = a[index] || 0;
-    const bValue = b[index] || 0;
-    dot += aValue * bValue;
-    normA += aValue * aValue;
-    normB += bValue * bValue;
-  }
-
-  if (!normA || !normB) return -1;
-  return dot / (Math.sqrt(normA) * Math.sqrt(normB));
-}
-
-function buildPreviewGroupEmbeddingDescriptors(groups: KeywordGroupingGroup[]): string[] {
-  return groups.map(
-    (group) =>
-      [
-        `product line: ${group.product_line}`,
-        `topic pillar: ${group.pillar}`,
-        `intent: ${group.intent}`,
-        `keyword group: ${group.keyword_group}`,
-        `slug: ${group.slug.replaceAll('/', ' ')}`,
-      ].join(' | ')
-  );
-}
-
-function getPreviewLexicalBoost(keyword: string, group: KeywordGroupingGroup): number {
-  const normalizedKeyword = normalizePreviewAssignmentKey(keyword);
-  const groupPhrases = [
-    group.keyword_group,
-    group.pillar,
-    group.product_line,
-    group.slug.replaceAll('/', ' '),
-  ]
-    .map((item) => normalizePreviewAssignmentKey(item))
-    .filter(Boolean);
-
-  let boost = 0;
-  for (const phrase of groupPhrases) {
-    if (normalizedKeyword === phrase) {
-      boost = Math.max(boost, 0.08);
-      continue;
-    }
-    if (normalizedKeyword.includes(phrase) || phrase.includes(normalizedKeyword)) {
-      boost = Math.max(boost, 0.05);
-    }
-  }
-
-  const keywordTokens = new Set(tokenizePreviewAssignmentText(keyword));
-  if (!keywordTokens.size) return boost;
-
-  for (const phrase of groupPhrases) {
-    const phraseTokens = tokenizePreviewAssignmentText(phrase);
-    if (!phraseTokens.length) continue;
-    let overlapCount = 0;
-    for (const token of phraseTokens) {
-      if (keywordTokens.has(token)) overlapCount += 1;
-    }
-    const overlapRatio = overlapCount / Math.max(keywordTokens.size, phraseTokens.length);
-    if (overlapRatio >= 0.75) {
-      boost = Math.max(boost, 0.05);
-    } else if (overlapRatio >= 0.5) {
-      boost = Math.max(boost, 0.03);
-    } else if (overlapRatio > 0) {
-      boost = Math.max(boost, 0.015);
-    }
-  }
-
-  return boost;
-}
-
-async function assignKeywordsToPreviewGroupsWithEmbeddings(
-  formData: Record<string, any>,
-  groups: KeywordGroupingGroup[],
-  keywords: GroupingKeywordInput[]
-): Promise<{ groups: KeywordGroupingGroup[]; raw: string }> {
-  const groupDescriptors = buildPreviewGroupEmbeddingDescriptors(groups);
-  const keywordTexts = keywords.map((keyword) => keyword.keyword.trim());
-  const [groupEmbeddings, keywordEmbeddings] = await Promise.all([
-    embedTextsWithGemini(groupDescriptors),
-    embedTextsWithGemini(keywordTexts),
-  ]);
-
-  const assignedGroups = groups.map((group) => ({ ...group, keywords: [] }));
-  const unmatchedKeywords: Array<{ keyword: string; search_volume: number | '-' }> = [];
-  let firstPassAssignments = 0;
-  let secondPassAssignments = 0;
-
-  for (let keywordIndex = 0; keywordIndex < keywords.length; keywordIndex += 1) {
-    const keyword = keywords[keywordIndex];
-    const keywordVector = keywordEmbeddings[keywordIndex];
-    let bestIndex = -1;
-    let bestSemanticScore = Number.NEGATIVE_INFINITY;
-    let bestCombinedScore = Number.NEGATIVE_INFINITY;
-    let secondBestCombinedScore = Number.NEGATIVE_INFINITY;
-
-    for (let groupIndex = 0; groupIndex < assignedGroups.length; groupIndex += 1) {
-      const semanticScore = cosineSimilarity(keywordVector, groupEmbeddings[groupIndex]);
-      const lexicalBoost = getPreviewLexicalBoost(keyword.keyword, assignedGroups[groupIndex]);
-      const combinedScore = semanticScore + lexicalBoost;
-
-      if (combinedScore > bestCombinedScore) {
-        secondBestCombinedScore = bestCombinedScore;
-        bestCombinedScore = combinedScore;
-        bestSemanticScore = semanticScore;
-        bestIndex = groupIndex;
-      } else if (combinedScore > secondBestCombinedScore) {
-        secondBestCombinedScore = combinedScore;
-      }
-    }
-
-    const lexicalBoost = bestIndex >= 0 ? getPreviewLexicalBoost(keyword.keyword, assignedGroups[bestIndex]) : 0;
-    const scoreMargin = bestCombinedScore - secondBestCombinedScore;
-    const qualifiesFirstPass =
-      bestIndex >= 0
-      && (
-        bestCombinedScore >= 0.82
-        || (bestCombinedScore >= 0.78 && scoreMargin >= 0.03)
-        || (bestSemanticScore >= 0.8 && lexicalBoost >= 0.015)
-      );
-
-    const qualifiesSecondPass =
-      bestIndex >= 0
-      && (
-        bestCombinedScore >= 0.74
-        || (bestCombinedScore >= 0.7 && scoreMargin >= 0.02)
-        || (bestSemanticScore >= 0.75 && lexicalBoost >= 0.03)
-      );
-
-    if (qualifiesFirstPass) {
-      assignedGroups[bestIndex].keywords.push({
-        keyword: keyword.keyword.trim(),
-        search_volume: typeof keyword.search_volume === 'number' ? keyword.search_volume : '-',
-      });
-      firstPassAssignments += 1;
-      continue;
-    }
-
-    if (qualifiesSecondPass) {
-      assignedGroups[bestIndex].keywords.push({
-        keyword: keyword.keyword.trim(),
-        search_volume: typeof keyword.search_volume === 'number' ? keyword.search_volume : '-',
-      });
-      secondPassAssignments += 1;
-      continue;
-    }
-
-    unmatchedKeywords.push({
-      keyword: keyword.keyword.trim(),
-      search_volume: typeof keyword.search_volume === 'number' ? keyword.search_volume : '-',
-    });
-  }
-
-  const validationResult = await validatePreviewGroupAssignmentsWithAi(formData, assignedGroups);
-
-  return {
-    groups: ensureKeywordGroupingCoverage(validationResult.groups, keywords),
-    raw: [
-      'Assignment Method: embeddings',
-      `Embedding Model: gemini-embedding-001`,
-      `Keyword Count: ${keywords.length}`,
-      `Group Count: ${groups.length}`,
-      `Assigned Pass 1: ${firstPassAssignments}`,
-      `Assigned Pass 2: ${secondPassAssignments}`,
-      `Needs Review: ${unmatchedKeywords.length}`,
-      unmatchedKeywords.length
-        ? `Needs Review Preview: ${unmatchedKeywords
-            .slice(0, 25)
-            .map((keyword) => `${keyword.keyword} | ${keyword.search_volume}`)
-            .join(' ; ')}`
-        : 'Needs Review Preview: none',
-      '',
-      validationResult.raw,
-    ].join('\n'),
-  };
-}
-
-async function validatePreviewGroupAssignmentsWithAi(
-  formData: Record<string, any>,
-  groups: KeywordGroupingGroup[]
-): Promise<{ groups: KeywordGroupingGroup[]; raw: string }> {
-  const validationPrompt = getKeywordGroupingPreviewValidationPrompt();
-  const validationModel = getKeywordGroupingPreviewAssignmentModelSelection();
-  const nonEmptyGroups = groups
-    .map((group, groupIndex) => ({ groupIndex, group }))
-    .filter(({ group }) => group.keywords.length > 0);
-
-  if (!nonEmptyGroups.length) {
-    return {
-      groups,
-      raw: 'Validation Method: ai-review\nValidation skipped: no assigned keywords to review.',
-    };
-  }
-
-  let validatedGroups = groups.map((group) => ({ ...group, keywords: [...group.keywords] }));
-  const rawParts = [
-    'Validation Method: ai-review',
-    `Validation Provider: ${validationModel.provider}`,
-    `Validation Model: ${validationModel.model}`,
-  ];
-
-  for (let index = 0; index < nonEmptyGroups.length; index += MAX_PREVIEW_VALIDATION_GROUPS_PER_BATCH) {
-    const batchGroups = nonEmptyGroups.slice(index, index + MAX_PREVIEW_VALIDATION_GROUPS_PER_BATCH).map(({ groupIndex }) => ({
-      groupIndex,
-      group: validatedGroups[groupIndex],
-    }));
-    const userMessage = buildPreviewValidationUserMessage(formData, batchGroups);
-    const result =
-      validationModel.provider === 'gemini'
-        ? await generateOnlyWithGemini(validationPrompt, userMessage, {
-            model: validationModel.model,
-            jsonSchema: getKeywordGroupingPreviewValidationJsonSchema(),
-          })
-        : await generateOnly(validationPrompt, userMessage, {
-            model: validationModel.model,
-            jsonSchema: getKeywordGroupingPreviewValidationJsonSchema(),
-          });
-
-    validatedGroups = parsePreviewValidationOutput(result.result, validatedGroups, batchGroups);
-    rawParts.push(`Validation Batch ${Math.floor(index / MAX_PREVIEW_VALIDATION_GROUPS_PER_BATCH) + 1}\n${result.result}`);
-  }
-
-  return {
-    groups: validatedGroups,
-    raw: rawParts.join('\n\n'),
-  };
-}
-
-async function assignKeywordsToPreviewGroupsWithAi(
+async function assignKeywordsToPreviewGroups(
   formData: Record<string, any>,
   groups: KeywordGroupingGroup[],
   keywords: GroupingKeywordInput[]
 ): Promise<{ groups: KeywordGroupingGroup[]; raw: string }> {
   const assignmentPrompt = getKeywordGroupingPreviewAssignmentPrompt();
-  const previewModel = getKeywordGroupingPreviewAssignmentModelSelection();
+  const previewModel: ReturnType<typeof getKeywordGroupingPreviewModelSelection> = {
+    provider: 'anthropic',
+    model: 'claude-sonnet-4-6',
+  };
   let assignedGroups = groups.map((group) => ({ ...group, keywords: [] }));
-  const rawParts: string[] = [];
+  const debugDir = path.join('/tmp', 'martech-seo-debug');
+  fs.mkdirSync(debugDir, { recursive: true });
+  const assignmentDebugPath = path.join(debugDir, 'preview-group-assignment-last-request.json');
+  const assignmentResponseDebugPath = path.join(debugDir, 'preview-group-assignment-last-response.json');
+  const rawParts: string[] = [
+    `assignment_provider=${previewModel.provider}`,
+    `assignment_model=${previewModel.model}`,
+    `assignment_temperatures=${PREVIEW_ASSIGNMENT_TEMPERATURES.join(',')}`,
+    `assignment_max_rounds=${MAX_PREVIEW_ASSIGNMENT_ROUNDS}`,
+    `assignment_debug_file=${assignmentDebugPath}`,
+    `assignment_response_debug_file=${assignmentResponseDebugPath}`,
+  ];
+  const requestLog: Array<Record<string, unknown>> = [];
+  const responseLog: Array<Record<string, unknown>> = [];
+
   const runAssignmentPass = async (
     sourceKeywords: GroupingKeywordInput[],
     passLabel: string,
-    assignmentInstruction: string
-  ): Promise<void> => {
+    assignmentInstruction: string,
+    assignmentTemperature: number
+  ) => {
     for (let index = 0; index < sourceKeywords.length; index += MAX_PREVIEW_ASSIGNMENT_KEYWORDS_PER_BATCH) {
       const keywordBatch = sourceKeywords.slice(index, index + MAX_PREVIEW_ASSIGNMENT_KEYWORDS_PER_BATCH);
       const userMessage = buildPreviewAssignmentUserMessage(formData, assignedGroups, keywordBatch, {
         passLabel,
         assignmentInstruction,
       });
+      requestLog.push({
+        pass: passLabel,
+        batch: Math.floor(index / MAX_PREVIEW_ASSIGNMENT_KEYWORDS_PER_BATCH) + 1,
+        provider: previewModel.provider,
+        model: previewModel.model,
+        temperature: assignmentTemperature,
+        keyword_count: keywordBatch.length,
+        system_prompt: assignmentPrompt,
+        user_message: userMessage,
+      });
       const result =
         previewModel.provider === 'gemini'
           ? await generateOnlyWithGemini(assignmentPrompt, userMessage, {
               model: previewModel.model,
               jsonSchema: getKeywordGroupingPreviewAssignmentJsonSchema(),
+              temperature: assignmentTemperature,
             })
           : await generateOnly(assignmentPrompt, userMessage, {
               model: previewModel.model,
               jsonSchema: getKeywordGroupingPreviewAssignmentJsonSchema(),
             });
 
+      responseLog.push({
+        pass: passLabel,
+        batch: Math.floor(index / MAX_PREVIEW_ASSIGNMENT_KEYWORDS_PER_BATCH) + 1,
+        provider: previewModel.provider,
+        model: previewModel.model,
+        temperature: assignmentTemperature,
+        raw_result: result.result,
+      });
       assignedGroups = parsePreviewAssignmentOutput(result.result, assignedGroups, keywordBatch);
-      rawParts.push(
-        `${passLabel} Batch ${Math.floor(index / MAX_PREVIEW_ASSIGNMENT_KEYWORDS_PER_BATCH) + 1}\n${result.result}`
-      );
+      rawParts.push(`${passLabel} Batch ${Math.floor(index / MAX_PREVIEW_ASSIGNMENT_KEYWORDS_PER_BATCH) + 1}\n${result.result}`);
     }
   };
 
@@ -1223,27 +768,103 @@ async function assignKeywordsToPreviewGroupsWithAi(
     const assigned = new Set<string>();
     for (const group of currentGroups) {
       for (const keyword of group.keywords) {
-        const normalizedKeyword = keyword.keyword?.trim().toLowerCase();
+        const normalizedKeyword = keyword.keyword.trim().toLowerCase();
         if (normalizedKeyword) assigned.add(normalizedKeyword);
       }
     }
     return assigned;
   };
 
+  const initialAssignmentTemperature = PREVIEW_ASSIGNMENT_TEMPERATURES[0];
   await runAssignmentPass(
     keywords,
     'Assignment Pass 1',
-    'Assign each keyword to the single best matching group only when the fit is clear. Leave unmatched keywords unassigned.'
+    'Assign each keyword to the most sensible existing group when there is a clear page-fit. Broad head terms should not go into niche pages unless the fit is very strong. Do not force keywords into a group just because they share words. Variant pages like wattage, subtype, feature, price, or installation should only receive keywords that clearly express that page purpose. If a keyword could fit several different page purposes, prefer leaving it unassigned. Leave it unassigned when the keyword is mainly retailer-led, competitor-led, documentation-led, image/asset-led, or otherwise a poor page match for the approved groups.',
+    initialAssignmentTemperature
   );
 
-  const initiallyAssignedKeywords = getAssignedKeywordSet(assignedGroups);
-  const unmatchedKeywords = keywords.filter((keyword) => !initiallyAssignedKeywords.has(keyword.keyword.trim().toLowerCase()));
+  let assignedKeywordSet = getAssignedKeywordSet(assignedGroups);
+  let remainingKeywords = keywords.filter(
+    (keyword) => !assignedKeywordSet.has(keyword.keyword.trim().toLowerCase())
+  );
 
-  if (unmatchedKeywords.length > 0) {
+  rawParts.push(
+    `Assignment Pass 1 Summary\ntemperature=${initialAssignmentTemperature}\nremaining_before=${keywords.length}\nremaining_after=${remainingKeywords.length}`
+  );
+
+  let previousRemainingCount = remainingKeywords.length;
+
+  for (let round = 2; round <= MAX_PREVIEW_ASSIGNMENT_ROUNDS; round += 1) {
+    if (!remainingKeywords.length) break;
+    const assignmentTemperature =
+      PREVIEW_ASSIGNMENT_TEMPERATURES[Math.min(round - 1, PREVIEW_ASSIGNMENT_TEMPERATURES.length - 1)];
+
     await runAssignmentPass(
-      unmatchedKeywords,
-      'Assignment Pass 2',
-      'These keywords were left unmatched in the first pass. Re-check them against the approved groups and assign them when there is one reasonable best-fit URL topic. Do not force obviously ambiguous keywords into the wrong group.'
+      remainingKeywords,
+      `Ungrouped Recheck Pass ${round - 1}`,
+      'These keywords are the leftovers after the full initial assignment pass. Re-check them using the approved groups plus the sample assigned keywords now visible in each group. Assign them only when one group is the clear practical home. Broad head terms should not go into niche pages unless the fit is very strong. Variant pages like wattage, subtype, feature, price, or installation should only receive keywords that clearly express that page purpose. Do not force mixed-intent, retailer, competitor, documentation, image, or poor-fit keywords into a group just to reduce leftovers.',
+      assignmentTemperature
+    );
+
+    assignedKeywordSet = getAssignedKeywordSet(assignedGroups);
+    const nextRemainingKeywords = keywords.filter(
+      (keyword) => !assignedKeywordSet.has(keyword.keyword.trim().toLowerCase())
+    );
+
+    rawParts.push(
+      `Ungrouped Recheck Pass ${round - 1} Summary\ntemperature=${assignmentTemperature}\nremaining_before=${remainingKeywords.length}\nremaining_after=${nextRemainingKeywords.length}`
+    );
+
+    if (nextRemainingKeywords.length >= previousRemainingCount) {
+      remainingKeywords = nextRemainingKeywords;
+      break;
+    }
+
+    previousRemainingCount = nextRemainingKeywords.length;
+    remainingKeywords = nextRemainingKeywords;
+  }
+
+  fs.writeFileSync(assignmentDebugPath, JSON.stringify(requestLog, null, 2), 'utf-8');
+  fs.writeFileSync(assignmentResponseDebugPath, JSON.stringify(responseLog, null, 2), 'utf-8');
+
+  if (remainingKeywords.length && isGeminiEmbeddingsEnabled()) {
+    const groupDescriptors = buildPreviewGroupEmbeddingDescriptors(assignedGroups);
+    const [keywordEmbeddings, groupEmbeddings] = await Promise.all([
+      embedTextsWithGemini(remainingKeywords.map((keyword) => keyword.keyword)),
+      embedTextsWithGemini(groupDescriptors),
+    ]);
+
+    let embeddingAssignedCount = 0;
+
+    for (let keywordIndex = 0; keywordIndex < remainingKeywords.length; keywordIndex += 1) {
+      const keywordVector = keywordEmbeddings[keywordIndex];
+      let bestGroupIndex = -1;
+      let bestScore = Number.NEGATIVE_INFINITY;
+
+      for (let groupIndex = 0; groupIndex < groupEmbeddings.length; groupIndex += 1) {
+        const score = cosineSimilarity(keywordVector, groupEmbeddings[groupIndex]);
+        if (score > bestScore) {
+          bestScore = score;
+          bestGroupIndex = groupIndex;
+        }
+      }
+
+      if (bestGroupIndex < 0 || bestScore <= PREVIEW_ASSIGNMENT_EMBEDDING_THRESHOLD) continue;
+
+      const keyword = remainingKeywords[keywordIndex];
+      assignedGroups[bestGroupIndex].keywords.push({
+        keyword: keyword.keyword.trim(),
+        search_volume: typeof keyword.search_volume === 'number' ? keyword.search_volume : '-',
+      });
+      embeddingAssignedCount += 1;
+    }
+
+    rawParts.push(
+      `Embedding Leftover Pass\nthreshold=${PREVIEW_ASSIGNMENT_EMBEDDING_THRESHOLD}\nremaining_before=${remainingKeywords.length}\nassigned=${embeddingAssignedCount}\nremaining_after=${remainingKeywords.length - embeddingAssignedCount}`
+    );
+  } else if (remainingKeywords.length) {
+    rawParts.push(
+      `Embedding Leftover Pass\nthreshold=${PREVIEW_ASSIGNMENT_EMBEDDING_THRESHOLD}\nskipped=embeddings_disabled\nremaining_before=${remainingKeywords.length}`
     );
   }
 
@@ -1253,25 +874,18 @@ async function assignKeywordsToPreviewGroupsWithAi(
   };
 }
 
-async function assignKeywordsToPreviewGroups(
+async function runUnifiedGroupingWorkflow(
   formData: Record<string, any>,
-  groups: KeywordGroupingGroup[],
   keywords: GroupingKeywordInput[]
-): Promise<{ groups: KeywordGroupingGroup[]; raw: string }> {
-  if (isGeminiEmbeddingsEnabled()) {
-    try {
-      return await assignKeywordsToPreviewGroupsWithEmbeddings(formData, groups, keywords);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      const fallback = await assignKeywordsToPreviewGroupsWithAi(formData, groups, keywords);
-      return {
-        groups: fallback.groups,
-        raw: `Embedding assignment failed, fell back to AI assignment.\n${message}\n\n${fallback.raw}`,
-      };
-    }
-  }
+): Promise<{ groups: KeywordGroupingGroup[]; raw: string; batchCount: number }> {
+  const blueprintResult = await generateGroupingBlueprint(formData, keywords);
+  const assignmentResult = await assignKeywordsToPreviewGroups(formData, blueprintResult.groups, keywords);
 
-  return assignKeywordsToPreviewGroupsWithAi(formData, groups, keywords);
+  return {
+    groups: assignmentResult.groups,
+    raw: `${blueprintResult.raw}\n\n${assignmentResult.raw}`,
+    batchCount: 1,
+  };
 }
 
 function isBlueprintNoiseKeyword(keyword: string): boolean {
@@ -1280,172 +894,6 @@ function isBlueprintNoiseKeyword(keyword: string): boolean {
 
 function isBlueprintNoiseGroup(keywordGroup: string, slug: string): boolean {
   return BLUEPRINT_LOW_VALUE_GROUP_PATTERN.test(keywordGroup) || BLUEPRINT_LOW_VALUE_GROUP_PATTERN.test(slug);
-}
-
-function buildGroupingMergeReviewUserMessage(
-  formData: Record<string, any>,
-  groups: KeywordGroupingGroup[]
-): string {
-  const parts: string[] = [];
-  parts.push(`Business Name: ${formData.businessName || 'N/A'}`);
-  parts.push(`Website URL: ${formData.websiteUrl || 'N/A'}`);
-  parts.push(`Business Description & Core Offerings: ${formData.businessDescription || 'N/A'}`);
-  parts.push(`SEO Goals & Conversion Action: ${formData.seoGoals || 'N/A'}`);
-  if (formData.mustRankKeywords?.length) {
-    parts.push(`Priority Keywords:\n${formData.mustRankKeywords.map((k: string) => `- ${k}`).join('\n')}`);
-  }
-  if (formData.focusProductLines?.length) {
-    parts.push(`Focus Product Lines:\n${formData.focusProductLines.map((p: string) => `- ${p}`).join('\n')}`);
-  }
-
-  const groupLines = groups.map((group, groupIndex) => {
-    const keywordsPreview = group.keywords
-      .slice(0, 12)
-      .map((keyword) => `${keyword.keyword} (${typeof keyword.search_volume === 'number' ? keyword.search_volume : '-'})`)
-      .join(' | ');
-    return `- G${groupIndex}: ${group.keyword_group} | ${group.slug} | ${keywordsPreview}`;
-  });
-
-  parts.push(`Groups in same pillar (${groups.length} groups):\n${groupLines.join('\n')}`);
-  parts.push('CRITICAL: output ONLY merges for groups that clearly should be the same URL. Use only G indexes.');
-  return parts.join('\n\n');
-}
-
-function parseMergeReviewOutput(raw: string, groupCount: number): KeywordGroupingMergeInstruction[] {
-  const parsed = JSON.parse(extractJsonObject(raw));
-  const rawMerges = Array.isArray(parsed?.merges) ? parsed.merges : [];
-  const used = new Set<number>();
-  const merges: KeywordGroupingMergeInstruction[] = [];
-
-  for (const item of rawMerges) {
-    const keep = Number(item?.keep);
-    const merge = Array.isArray(item?.merge)
-      ? item.merge
-          .map((value: unknown) => Number(value))
-          .filter((value: number) => Number.isInteger(value) && value >= 0 && value < groupCount && value !== keep)
-      : [];
-
-    if (!Number.isInteger(keep) || keep < 0 || keep >= groupCount) continue;
-    if (!merge.length) continue;
-    if (used.has(keep) || merge.some((value) => used.has(value))) continue;
-
-    used.add(keep);
-    for (const value of merge) used.add(value);
-    merges.push({ keep, merge });
-  }
-
-  return merges;
-}
-
-async function repairKeywordGroupingBatch(
-  formData: Record<string, any>,
-  plan: KeywordGroupingPlan,
-  batch: GroupingKeywordInput[]
-) {
-  const repairPrompt = getKeywordGroupingRepairPrompt();
-  const repairUserMessage = buildGroupingRepairUserMessage(formData, plan, batch);
-  const repairResult = await generateOnly(repairPrompt, repairUserMessage, {
-    jsonSchema: getKeywordGroupingBatchJsonSchema(),
-  });
-  return parseAndValidateKeywordGroupingBatchOutput(repairResult.result, batch, plan);
-}
-
-async function maybeRepairNeedsReviewGroups(
-  formData: Record<string, any>,
-  plan: KeywordGroupingPlan,
-  groups: KeywordGroupingGroup[]
-): Promise<KeywordGroupingGroup[]> {
-  const needsReviewKeywords = extractNeedsReviewKeywords(groups);
-  if (!needsReviewKeywords.length) {
-    return groups;
-  }
-
-  try {
-    const repaired = await repairKeywordGroupingBatch(formData, plan, needsReviewKeywords);
-    return mergeRepairGroupsIntoResults(groups, repaired.groups);
-  } catch (repairError) {
-    console.error('Grouping repair pass failed:', repairError);
-    return groups;
-  }
-}
-
-async function maybeMergeSimilarGroups(
-  formData: Record<string, any>,
-  groups: KeywordGroupingGroup[]
-): Promise<KeywordGroupingGroup[]> {
-  const mergePrompt = getKeywordGroupingMergeReviewPrompt();
-  const buckets = new Map<string, { indexes: number[]; groups: KeywordGroupingGroup[] }>();
-
-  groups.forEach((group, index) => {
-    const key = `${group.product_line}::${group.pillar}::${group.intent}`;
-    const bucket = buckets.get(key);
-    if (bucket) {
-      bucket.indexes.push(index);
-      bucket.groups.push(group);
-      return;
-    }
-    buckets.set(key, { indexes: [index], groups: [group] });
-  });
-
-  let workingGroups = [...groups];
-
-  for (const bucket of buckets.values()) {
-    if (bucket.groups.length < 2) continue;
-
-    try {
-      const userMessage = buildGroupingMergeReviewUserMessage(formData, bucket.groups);
-      const result = await generateOnly(mergePrompt, userMessage, {
-        jsonSchema: getKeywordGroupingMergeReviewJsonSchema(),
-      });
-      const localInstructions = parseMergeReviewOutput(result.result, bucket.groups.length);
-      if (!localInstructions.length) continue;
-
-      const mappedInstructions = localInstructions.map((instruction) => ({
-        keep: bucket.indexes[instruction.keep],
-        merge: instruction.merge.map((value) => bucket.indexes[value]),
-      }));
-
-      workingGroups = applyKeywordGroupingMerges(workingGroups, mappedInstructions);
-    } catch (mergeError) {
-      console.error('Grouping merge review failed:', mergeError);
-    }
-  }
-
-  return workingGroups;
-}
-
-async function buildGroupingFinalBatches(
-  keywords: GroupingKeywordInput[]
-): Promise<GroupingKeywordInput[][]> {
-  return chunkGroupingPlanKeywords(keywords, MAX_GROUPING_FINAL_KEYWORDS_PER_BATCH).filter(
-    (batch) => batch.length > 0
-  );
-}
-
-function buildExistingGroupsSummary(groups: KeywordGroupingGroup[], plan: KeywordGroupingPlan): string {
-  if (!groups.length) return '';
-
-  const planIndexByScope = new Map<string, { pl: number; pi: number }>();
-  plan.product_lines.forEach((productLine, pl) => {
-    productLine.pillars.forEach((pillar, pi) => {
-      planIndexByScope.set(`${productLine.name}::${pillar.name}`, { pl, pi });
-    });
-  });
-
-  const lines = groups
-    .slice(0, 200)
-    .map((group) => {
-      const scope = planIndexByScope.get(`${group.product_line}::${group.pillar}`);
-      if (!scope) return null;
-      const keywordPreview = group.keywords
-        .slice(0, 5)
-        .map((keyword) => keyword.keyword)
-        .join(' | ');
-      return `- PL${scope.pl}/PI${scope.pi}: ${group.keyword_group} | ${group.slug} | ${keywordPreview}`;
-    })
-    .filter(Boolean) as string[];
-
-  return lines.join('\n');
 }
 
 function nowIso() {
@@ -1587,103 +1035,23 @@ async function processGroupingJob(jobId: string) {
   try {
     job.status = 'running';
     job.started_at = nowIso();
-    let groups: KeywordGroupingGroup[] = [];
-    let raw = '';
-    let batchCount = 1;
+    job.progress.phase = 'final_grouping';
+    job.progress.total_plan_batches = 0;
+    job.progress.completed_plan_batches = 0;
+    job.progress.total_final_batches = 1;
+    job.progress.completed_final_batches = 0;
+    job.progress.current_batch = 1;
+    job.progress.message = job.preview_only
+      ? 'Generating candidate keyword groups'
+      : 'Generating keyword groups';
 
-    if (job.preview_only) {
-      job.progress.phase = 'final_grouping';
-      job.progress.total_plan_batches = 0;
-      job.progress.completed_plan_batches = 0;
-      job.progress.total_final_batches = 1;
-      job.progress.completed_final_batches = 0;
-      job.progress.current_batch = 1;
-      job.progress.message = 'Generating candidate keyword groups';
-
-      const blueprintResult = await generateGroupingBlueprint(job.formData, job.keywords);
-      groups = blueprintResult.groups;
-      raw = blueprintResult.raw;
-      job.progress.completed_final_batches = 1;
-    } else {
-      job.progress.phase = 'planning';
-      job.progress.message = 'Preparing keyword grouping plan';
-
-      const planPrompt = getKeywordGroupingPlanPrompt();
-      const keywordBatches = chunkGroupingPlanKeywords(job.keywords, MAX_GROUPING_PLAN_KEYWORDS_PER_BATCH);
-      const parsedPlans: KeywordGroupingPlan[] = [];
-      const planRawParts: string[] = [];
-      job.progress.total_plan_batches = keywordBatches.length;
-
-      for (let batchIndex = 0; batchIndex < keywordBatches.length; batchIndex += 1) {
-        const batch = keywordBatches[batchIndex];
-        job.progress.current_batch = batchIndex + 1;
-        job.progress.message = `Planning batch ${batchIndex + 1} of ${keywordBatches.length}`;
-        const userMessage = buildGroupingPlanUserMessage(job.formData, batch);
-        const result = await generateOnly(planPrompt, userMessage, {
-          jsonSchema: getKeywordGroupingPlanJsonSchema(),
-        });
-        const plan = parseAndValidateKeywordGroupingPlanOutput(result.result);
-        parsedPlans.push(plan);
-        planRawParts.push(`Batch ${batchIndex + 1}/${keywordBatches.length}\n${result.result}`);
-        job.progress.completed_plan_batches = batchIndex + 1;
-      }
-
-      job.progress.phase = 'merging_plan';
-      job.progress.current_batch = null;
-      job.progress.message = 'Merging product lines and pillars';
-      const mergedPlan = mergeKeywordGroupingPlans(parsedPlans);
-      job.plan = mergedPlan;
-      job.plan_raw = planRawParts.join('\n\n');
-
-      job.progress.phase = 'final_grouping';
-      const finalPrompt = getKeywordGroupingGroupsPrompt();
-      const finalBatches = await buildGroupingFinalBatches(job.keywords);
-      job.progress.total_final_batches = finalBatches.length;
-      job.progress.completed_final_batches = 0;
-      batchCount = finalBatches.length;
-      console.log(`[Grouping] Final grouping will use ${finalBatches.length} batches for ${job.keywords.length} keywords`);
-
-      const parsedResults = [];
-      const finalRawParts: string[] = [];
-
-      for (let batchIndex = 0; batchIndex < finalBatches.length; batchIndex += 1) {
-        const batch = finalBatches[batchIndex];
-        job.progress.current_batch = batchIndex + 1;
-        job.progress.message = `Grouping batch ${batchIndex + 1} of ${finalBatches.length}`;
-        const existingGroupsSummary = buildExistingGroupsSummary(mergeKeywordGroupingBatchResults(parsedResults), mergedPlan);
-        const userMessage = buildGroupingFinalUserMessage(job.formData, mergedPlan, batch, existingGroupsSummary);
-        const result = await generateOnly(finalPrompt, userMessage, {
-          jsonSchema: getKeywordGroupingBatchJsonSchema(),
-        });
-        let batchResult;
-
-        try {
-          batchResult = parseAndValidateKeywordGroupingBatchOutput(result.result, batch, mergedPlan);
-        } catch (batchError) {
-          console.error(`Grouping final batch ${batchIndex + 1}/${finalBatches.length} parse failed, trying repair pass:`, batchError);
-          try {
-            batchResult = await repairKeywordGroupingBatch(job.formData, mergedPlan, batch);
-          } catch (repairError) {
-            console.error(`Grouping final batch ${batchIndex + 1}/${finalBatches.length} repair fallback:`, repairError);
-            batchResult = buildFallbackKeywordGroupingBatchResult(batch, `batch-${batchIndex + 1}`);
-          }
-        }
-
-        batchResult = {
-          groups: await maybeRepairNeedsReviewGroups(job.formData, mergedPlan, batchResult.groups),
-        };
-        parsedResults.push(batchResult);
-        finalRawParts.push(`Batch ${batchIndex + 1}/${finalBatches.length}\n${result.result}`);
-        job.progress.completed_final_batches = batchIndex + 1;
-      }
-
-      groups = ensureKeywordGroupingCoverage(mergeKeywordGroupingBatchResults(parsedResults), job.keywords);
-      groups = await maybeRepairNeedsReviewGroups(job.formData, mergedPlan, groups);
-      groups = ensureKeywordGroupingCoverage(groups, job.keywords);
-      groups = await maybeMergeSimilarGroups(job.formData, groups);
-      groups = ensureKeywordGroupingCoverage(groups, job.keywords);
-      raw = finalRawParts.join('\n\n');
-    }
+    const unifiedResult = await runUnifiedGroupingWorkflow(job.formData, job.keywords);
+    const groups = unifiedResult.groups;
+    const raw = unifiedResult.raw;
+    const batchCount = unifiedResult.batchCount;
+    job.plan = null;
+    job.plan_raw = null;
+    job.progress.completed_final_batches = 1;
 
     const csv = renderKeywordGroupingCsv(groups);
     const coveredKeywordCount = groups.reduce((sum, group) => sum + group.keywords.length, 0);
@@ -2030,15 +1398,10 @@ keywordRouter.get('/grouping-jobs/:jobId', async (req: Request, res: Response) =
 
 keywordRouter.post('/grouping-final', async (req: Request, res: Response) => {
   try {
-    const { formData, plan, keywords } = req.body;
+    const { formData, keywords } = req.body;
     const validationError = validateFormData(formData);
     if (validationError) {
       res.status(400).json({ error: validationError, code: 'validation' });
-      return;
-    }
-
-    if (!plan?.product_lines?.length) {
-      res.status(400).json({ error: 'grouping plan is required', code: 'validation' });
       return;
     }
 
@@ -2046,48 +1409,10 @@ keywordRouter.post('/grouping-final', async (req: Request, res: Response) => {
       res.status(400).json({ error: 'keywords are required', code: 'validation' });
       return;
     }
-
-    const systemPrompt = getKeywordGroupingGroupsPrompt();
-    const keywordBatches = await buildGroupingFinalBatches(keywords);
-    console.log(`[Grouping] Final grouping will use ${keywordBatches.length} batches for ${keywords.length} keywords`);
-    const parsedResults = [];
-    const rawParts: string[] = [];
-
-    for (let batchIndex = 0; batchIndex < keywordBatches.length; batchIndex += 1) {
-      const batch = keywordBatches[batchIndex];
-      const existingGroupsSummary = buildExistingGroupsSummary(mergeKeywordGroupingBatchResults(parsedResults), plan);
-      const userMessage = buildGroupingFinalUserMessage(formData, plan, batch, existingGroupsSummary);
-      const result = await generateOnly(systemPrompt, userMessage, {
-        jsonSchema: getKeywordGroupingBatchJsonSchema(),
-      });
-      let batchResult;
-
-      try {
-        batchResult = parseAndValidateKeywordGroupingBatchOutput(result.result, batch, plan);
-      } catch (batchError) {
-        console.error(`Grouping final batch ${batchIndex + 1}/${keywordBatches.length} parse failed, trying repair pass:`, batchError);
-        try {
-          batchResult = await repairKeywordGroupingBatch(formData, plan, batch);
-        } catch (repairError) {
-          console.error(`Grouping final batch ${batchIndex + 1}/${keywordBatches.length} repair fallback:`, repairError);
-          batchResult = buildFallbackKeywordGroupingBatchResult(batch, `batch-${batchIndex + 1}`);
-        }
-      }
-
-      batchResult = {
-        groups: await maybeRepairNeedsReviewGroups(formData, plan, batchResult.groups),
-      };
-      parsedResults.push(batchResult);
-      rawParts.push(`Batch ${batchIndex + 1}/${keywordBatches.length}\n${result.result}`);
-    }
-
-    let groups = ensureKeywordGroupingCoverage(mergeKeywordGroupingBatchResults(parsedResults), keywords);
-    groups = await maybeRepairNeedsReviewGroups(formData, plan, groups);
-    groups = ensureKeywordGroupingCoverage(groups, keywords);
-    groups = await maybeMergeSimilarGroups(formData, groups);
-    groups = ensureKeywordGroupingCoverage(groups, keywords);
-    const raw = rawParts.join('\n\n');
-    const batchCount = keywordBatches.length;
+    const unifiedResult = await runUnifiedGroupingWorkflow(formData, keywords);
+    const groups = unifiedResult.groups;
+    const raw = unifiedResult.raw;
+    const batchCount = unifiedResult.batchCount;
     const csv = renderKeywordGroupingCsv(groups);
     const coveredKeywordCount = groups.reduce((sum, group) => sum + group.keywords.length, 0);
 

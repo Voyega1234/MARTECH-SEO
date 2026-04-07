@@ -101,62 +101,6 @@ export function getKeywordGroupingBlueprintJsonSchema(): ClaudeJsonSchemaConfig 
   };
 }
 
-export function getKeywordGroupingPreviewClustersJsonSchema(): ClaudeJsonSchemaConfig {
-  return {
-    name: 'keyword_grouping_preview_clusters',
-    schema: {
-      type: 'object',
-      additionalProperties: false,
-      required: ['clusters'],
-      properties: {
-        clusters: {
-          type: 'array',
-          items: {
-            type: 'object',
-            additionalProperties: false,
-            required: ['k'],
-            properties: {
-              k: {
-                type: 'array',
-                items: { type: 'integer' },
-              },
-            },
-          },
-        },
-      },
-    },
-  };
-}
-
-export function getKeywordGroupingPreviewClusterNamesJsonSchema(): ClaudeJsonSchemaConfig {
-  return {
-    name: 'keyword_grouping_preview_cluster_names',
-    schema: {
-      type: 'object',
-      additionalProperties: false,
-      required: ['groups'],
-      properties: {
-        groups: {
-          type: 'array',
-          items: {
-            type: 'object',
-            additionalProperties: false,
-            required: ['id', 'product_line', 'topic_pillar', 'intent', 'keyword_group', 'slug'],
-            properties: {
-              id: { type: 'integer' },
-              product_line: { type: 'string' },
-              topic_pillar: { type: 'string' },
-              intent: { type: 'string' },
-              keyword_group: { type: 'string' },
-              slug: { type: 'string' },
-            },
-          },
-        },
-      },
-    },
-  };
-}
-
 export function getKeywordGroupingPreviewAssignmentJsonSchema(): ClaudeJsonSchemaConfig {
   return {
     name: 'keyword_grouping_preview_assignment',
@@ -174,34 +118,6 @@ export function getKeywordGroupingPreviewAssignmentJsonSchema(): ClaudeJsonSchem
             properties: {
               g: { type: 'integer' },
               k: {
-                type: 'array',
-                items: { type: 'integer' },
-              },
-            },
-          },
-        },
-      },
-    },
-  };
-}
-
-export function getKeywordGroupingPreviewValidationJsonSchema(): ClaudeJsonSchemaConfig {
-  return {
-    name: 'keyword_grouping_preview_validation',
-    schema: {
-      type: 'object',
-      additionalProperties: false,
-      required: ['reviews'],
-      properties: {
-        reviews: {
-          type: 'array',
-          items: {
-            type: 'object',
-            additionalProperties: false,
-            required: ['g', 'keep'],
-            properties: {
-              g: { type: 'integer' },
-              keep: {
                 type: 'array',
                 items: { type: 'integer' },
               },

@@ -139,27 +139,3 @@ export function getKeywordGroupingPreviewModelSelection(): {
     model: process.env.KEYWORD_GROUPING_PREVIEW_MODEL?.trim() || 'gemini-3.1-pro-preview',
   };
 }
-
-export function getKeywordGroupingPreviewAssignmentModelSelection(): {
-  provider: PreviewModelProvider;
-  model: string;
-} {
-  const provider = getPreviewProviderFromEnv('KEYWORD_GROUPING_PREVIEW_ASSIGNMENT_PROVIDER');
-
-  if (provider === 'anthropic') {
-    return {
-      provider,
-      model:
-        process.env.KEYWORD_GROUPING_PREVIEW_ASSIGNMENT_MODEL?.trim()
-        || process.env.CLAUDE_MODEL
-        || 'claude-sonnet-4-6',
-    };
-  }
-
-  return {
-    provider,
-    model:
-      process.env.KEYWORD_GROUPING_PREVIEW_ASSIGNMENT_MODEL?.trim()
-      || 'gemini-3.1-flash-lite-preview',
-  };
-}
