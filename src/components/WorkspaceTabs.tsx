@@ -1,13 +1,13 @@
 interface WorkspaceTabsProps {
-  activeWorkspace: 'keyword' | 'paa-blog';
-  onChange: (workspace: 'keyword' | 'paa-blog') => void;
+  activeWorkspace: 'strategy' | 'paa-blog';
+  onChange: (workspace: 'strategy' | 'paa-blog') => void;
 }
 
 const tabs = [
   {
-    id: 'keyword' as const,
-    label: 'Keyword Workflow',
-    description: 'Seed > expand > grouping',
+    id: 'strategy' as const,
+    label: 'Strategy Workflow',
+    description: 'Topic universe > sitemap > matching',
   },
   {
     id: 'paa-blog' as const,

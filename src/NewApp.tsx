@@ -7,6 +7,7 @@ import { Input } from './components/Input';
 import { PaaBlogWorkspace } from './components/PaaBlogWorkspace';
 import { Sidebar } from './components/Sidebar';
 import { TextArea } from './components/TextArea';
+import { StrategyWorkspace } from './components/StrategyWorkspace';
 import { WorkspaceTabs } from './components/WorkspaceTabs';
 import {
   createPaaBlogJob,
@@ -70,8 +71,17 @@ const mockFormData: Record<string, any> = {
   locationName: 'Thailand',
 };
 
-type ActivePanel = 'business' | 'seeds' | 'keywords' | 'grouping';
-type ActiveWorkspace = 'keyword' | 'paa-blog';
+type ActivePanel =
+  | 'business'
+  | 'topic-universe'
+  | 'sitemap'
+  | 'seeds-from-sitemap'
+  | 'expand-from-seeds'
+  | 'matching'
+  | 'seeds'
+  | 'keywords'
+  | 'grouping';
+type ActiveWorkspace = 'strategy' | 'paa-blog';
 type GeneratingState = null | 'seeds' | 'keywords';
 const GROUPING_PLAN_BATCH_SIZE = 2500;
 const DEFAULT_PRE_RELEVANCE_MIN_SEARCH_VOLUME = 0;
@@ -224,7 +234,7 @@ function mapGroupingJobToUiProgress(job: KeywordGroupingJobDetail): GroupingRunP
 
 export default function NewApp() {
   const [formData, setFormData] = useState<Record<string, any>>({ ...initialFormData });
-  const [activeWorkspace, setActiveWorkspace] = useState<ActiveWorkspace>('keyword');
+  const [activeWorkspace, setActiveWorkspace] = useState<ActiveWorkspace>('strategy');
   const [activePanel, setActivePanel] = useState<ActivePanel>('business');
   const [generating, setGenerating] = useState<GeneratingState>(null);
   const [seedKeywordsText, setSeedKeywordsText] = useState('');
@@ -481,44 +491,54 @@ export default function NewApp() {
       {
         id: 'business',
         label: 'Business Context',
-        state: (seedKeywords.length ? 'complete' : activePanel === 'business' ? 'active' : 'pending') as
+        state: (activePanel === 'business' ? 'active' : 'complete') as
           | 'pending'
           | 'active'
           | 'complete',
       },
       {
-        id: 'seeds',
-        label: 'Seed Keywords',
-        badge: seedKeywords.length,
-        state: (expandedResult
-          ? 'complete'
-          : activePanel === 'seeds'
+        id: 'topic-universe',
+        label: 'Generate Topic Universe',
+        state: (activePanel === 'topic-universe'
           ? 'active'
-          : seedKeywords.length
+          : ['sitemap', 'seeds-from-sitemap', 'expand-from-seeds', 'matching'].includes(activePanel)
           ? 'complete'
           : 'pending') as 'pending' | 'active' | 'complete',
       },
       {
-        id: 'keywords',
-        label: 'Expanded Keywords',
-        badge: keywordCount,
-        state: (activePanel === 'keywords' ? 'active' : keywordCount ? 'complete' : 'pending') as
-          | 'pending'
-          | 'active'
-          | 'complete',
-      },
-      {
-        id: 'grouping',
-        label: 'Grouping Plan',
-        badge: groupingPillarCount || undefined,
-        state: (activePanel === 'grouping'
+        id: 'sitemap',
+        label: 'Generate Sitemap',
+        state: (activePanel === 'sitemap'
           ? 'active'
-          : groupingPlanResult || expandedResult
+          : ['seeds-from-sitemap', 'expand-from-seeds', 'matching'].includes(activePanel)
           ? 'complete'
           : 'pending') as 'pending' | 'active' | 'complete',
+      },
+      {
+        id: 'seeds-from-sitemap',
+        label: 'Generate Seeds from Sitemap',
+        state: (activePanel === 'seeds-from-sitemap'
+          ? 'active'
+          : ['expand-from-seeds', 'matching'].includes(activePanel)
+          ? 'complete'
+          : 'pending') as 'pending' | 'active' | 'complete',
+      },
+      {
+        id: 'expand-from-seeds',
+        label: 'Expand Keywords from Seeds',
+        state: (activePanel === 'expand-from-seeds'
+          ? 'active'
+          : activePanel === 'matching'
+          ? 'complete'
+          : 'pending') as 'pending' | 'active' | 'complete',
+      },
+      {
+        id: 'matching',
+        label: 'Match Keywords to Sitemap',
+        state: (activePanel === 'matching' ? 'active' : 'pending') as 'pending' | 'active' | 'complete',
       },
     ],
-    [activePanel, seedKeywords.length, keywordCount, expandedResult, groupingPlanResult, groupingPillarCount]
+    [activePanel, keywordCount]
   );
 
   const projectName = formData.businessName || undefined;
@@ -732,19 +752,52 @@ export default function NewApp() {
       return;
     }
 
-    if (stepId === 'seeds') {
-      setActivePanel('seeds');
+    if (stepId === 'topic-universe') {
+      setActivePanel('topic-universe');
       return;
     }
 
-    if (stepId === 'keywords' && expandedResult) {
-      setActivePanel('keywords');
+    if (stepId === 'sitemap') {
+      setActivePanel('sitemap');
       return;
     }
 
-    if (stepId === 'grouping' && expandedResult) {
-      setActivePanel('grouping');
+    if (stepId === 'seeds-from-sitemap') {
+      setActivePanel('seeds-from-sitemap');
+      return;
     }
+
+    if (stepId === 'expand-from-seeds') {
+      setActivePanel('expand-from-seeds');
+      return;
+    }
+
+    if (stepId === 'matching') {
+      setActivePanel('matching');
+    }
+  };
+
+  const handleStrategyExpansionComplete = async (
+    nextExpandedResult: KeywordExpansionResult,
+    ensuredProjectId: string | null
+  ) => {
+    setExpandedResult(nextExpandedResult);
+    setFilteredKeywordRows(nextExpandedResult.keywords || []);
+    setSavedFilteredKeywordRows(nextExpandedResult.keywords || []);
+    setSavedFilterUpdatedAt(new Date().toISOString());
+
+    if (ensuredProjectId) {
+      await saveKeywordResult(ensuredProjectId, JSON.stringify(nextExpandedResult));
+      await refreshSeedRunHistory(ensuredProjectId);
+    }
+
+    setProjects(await listProjects());
+  };
+
+  const handleStrategyKeywordSetSaved = (rows: KeywordExpansionKeywordRow[]) => {
+    setFilteredKeywordRows(rows);
+    setSavedFilteredKeywordRows(rows);
+    setSavedFilterUpdatedAt(new Date().toISOString());
   };
 
   const handleEditSeeds = () => {
@@ -883,6 +936,7 @@ export default function NewApp() {
     clearStoredGroupingJobRef();
     setShowProjectList(false);
     setProjectLoadingName(project.business_name);
+    setActiveWorkspace('strategy');
     setError('');
     setGroupingPlanLoading(false);
     setGroupingRunProgress(null);
@@ -931,7 +985,7 @@ export default function NewApp() {
           ...prev,
           competitorDomains: stored.source_catalog.c || [],
         }));
-        setActivePanel('keywords');
+        setActivePanel('business');
       } else {
         setExpandedResult(null);
         setFilteredKeywordRows([]);
@@ -945,7 +999,7 @@ export default function NewApp() {
         setSeedKeywordsText('');
         setDraftSeedKeywordsText('');
         setIsEditingSeeds(false);
-        setActivePanel(seedRuns.length ? 'seeds' : 'business');
+        setActivePanel('business');
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load project');
@@ -1137,7 +1191,7 @@ export default function NewApp() {
       )}
 
       <div className="flex flex-1 overflow-hidden">
-        {activeWorkspace === 'keyword' ? <Sidebar steps={sidebarSteps} onStepClick={handleStepClick} /> : null}
+        {activeWorkspace === 'strategy' ? <Sidebar steps={sidebarSteps} onStepClick={handleStepClick} allowPendingClicks /> : null}
 
         <main className="flex-1 overflow-hidden flex flex-col bg-white">
           {activeWorkspace === 'paa-blog' ? (
@@ -1152,6 +1206,18 @@ export default function NewApp() {
               paaRunning={paaBlogRunning}
               onRun={handleRunPaaBlog}
               onExportCsv={handleExportPaaBlogCsv}
+            />
+          ) : activeWorkspace === 'strategy' ? (
+            <StrategyWorkspace
+              activePanel={activePanel as 'business' | 'topic-universe' | 'sitemap' | 'seeds-from-sitemap' | 'expand-from-seeds' | 'matching'}
+              formData={formData}
+              setFormData={setFormData}
+              expandedKeywords={savedFilteredKeywordRows.length ? savedFilteredKeywordRows : expandedResult?.keywords || []}
+              onNavigateToPanel={setActivePanel}
+              projectId={projectId}
+              onEnsureProject={ensureProject}
+              onExpansionComplete={handleStrategyExpansionComplete}
+              onKeywordSetSaved={handleStrategyKeywordSetSaved}
             />
           ) : (
             <>

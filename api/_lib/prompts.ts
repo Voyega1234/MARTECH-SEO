@@ -11,6 +11,22 @@ export function getKeywordGeneratorPrompt(): string {
   return loadPrompt('Keyword_generator.md');
 }
 
+export function getTopicUniversePrompt(): string {
+  return loadPrompt('Topic_universe.md');
+}
+
+export function getSitemapFromTopicUniversePrompt(): string {
+  return loadPrompt('Sitemap_from_topic_universe.md');
+}
+
+export function getSeedFromSitemapPrompt(): string {
+  return loadPrompt('Seed_from_sitemap.md');
+}
+
+export function getKeywordToSitemapMatchingPrompt(): string {
+  return loadPrompt('Keyword_to_sitemap_matching.md');
+}
+
 export function getSitemapPrompt(): string {
   return loadPrompt('Keyword_sitemap.md');
 }

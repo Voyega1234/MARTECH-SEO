@@ -9,6 +9,7 @@ import {
 } from '../services/geminiText.ts';
 import { embedTextsWithGemini, isGeminiEmbeddingsEnabled } from '../services/geminiEmbeddings.ts';
 import {
+  getKeywordToSitemapMatchingPrompt,
   getKeywordGroupingBlueprintPrompt,
   getKeywordGroupingPreviewAssignmentPrompt,
   getKeywordGeneratorPrompt,
@@ -17,10 +18,33 @@ import {
   getPaaBlogIdeasPrompt,
   getPaaBlogSeedSelectionPrompt,
   getSeedKeywordPrompt,
+  getSeedFromSitemapPrompt,
+  getSitemapFromTopicUniversePrompt,
+  getTopicUniversePrompt,
 } from '../config/prompts.ts';
 import { fetchGoogleOrganicSerpFeatures } from '../services/dfsSerp.ts';
 import { verifyDashVolumes } from '../services/volumeVerifier.ts';
 import { parseAndValidateSeedOutput } from '../../shared/seedKeywords.ts';
+import {
+  parseSitemapMatchingOutput,
+  renderSitemapMatchingCsv,
+  type SitemapMatchingResult,
+} from '../../shared/sitemapMatching.ts';
+import {
+  parseSitemapRowsOutput,
+  renderSitemapRowsCsv,
+  type SitemapRow,
+} from '../../shared/sitemapRows.ts';
+import {
+  parseSitemapSeedPlanOutput,
+  renderSitemapSeedCoverageCsv,
+  type SitemapSeedPlan,
+} from '../../shared/sitemapSeeds.ts';
+import {
+  parseTopicUniverseOutput,
+  renderTopicUniverseCsv,
+  type TopicUniverseRow,
+} from '../../shared/topicUniverse.ts';
 import type { KeywordGroupingPlan, PillarIntent } from '../../shared/keywordGroupingPlan.ts';
 import { mergeKeywordGroupingPlans, parseAndValidateKeywordGroupingPlanOutput } from '../../shared/keywordGroupingPlan.ts';
 import {
@@ -45,6 +69,10 @@ import {
   getKeywordRelevanceFilterJsonSchema,
   getPaaBlogIdeasJsonSchema,
   getPaaSeedSelectionJsonSchema,
+  getSitemapMatchingJsonSchema,
+  getSitemapRowsJsonSchema,
+  getSitemapSeedPlanJsonSchema,
+  getTopicUniverseJsonSchema,
 } from '../../shared/claudeStructuredSchemas.ts';
 
 export const keywordRouter = Router();
@@ -157,6 +185,83 @@ function buildSeedUserMessage(formData: Record<string, any>): string {
   if (formData.focusProductLines?.length) {
     parts.push(`Focus Product Lines:\n${formData.focusProductLines.map((p: string) => `- ${p}`).join('\n')}`);
   }
+  return parts.join('\n\n');
+}
+
+function buildTopicUniverseUserMessage(formData: Record<string, any>): string {
+  const parts: string[] = [];
+  parts.push(`Business Name: ${formData.businessName || 'N/A'}`);
+  parts.push(`Website URL: ${formData.websiteUrl || 'N/A'}`);
+  parts.push(`Business Description & Core Offerings: ${formData.businessDescription || 'N/A'}`);
+  parts.push(`SEO Goals & Conversion Action: ${formData.seoGoals || 'N/A'}`);
+  if (formData.mustRankKeywords?.length) {
+    parts.push(`Priority Keywords:\n${formData.mustRankKeywords.map((k: string) => `- ${k}`).join('\n')}`);
+  }
+  if (formData.focusProductLines?.length) {
+    parts.push(`Focus Product Lines:\n${formData.focusProductLines.map((p: string) => `- ${p}`).join('\n')}`);
+  }
+  parts.push(`Target Market: ${formData.locationName || 'Thailand'}`);
+  parts.push('Output Language Rule: Prefer Thai by default because the target audience is Thai users. Use English only for brand names, established technical terms, or search phrases commonly used in Thailand as-is.');
+  return parts.join('\n\n');
+}
+
+function buildSitemapFromTopicUniverseUserMessage(
+  formData: Record<string, any>,
+  topicUniverseRows: TopicUniverseRow[]
+): string {
+  const parts = [buildTopicUniverseUserMessage(formData)];
+  parts.push(
+    `Topic Universe (${topicUniverseRows.length} rows):\n${topicUniverseRows
+      .map(
+        (row) =>
+          `- #${row.index}: ${row.dimension_name} | ${row.primary_intent} | ${row.what_it_covers} | examples: ${row.example_search_queries.join(' ; ')}`
+      )
+      .join('\n')}`
+  );
+  return parts.join('\n\n');
+}
+
+function buildSeedFromSitemapUserMessage(
+  formData: Record<string, any>,
+  sitemapRows: SitemapRow[]
+): string {
+  const parts = [buildTopicUniverseUserMessage(formData)];
+  parts.push(
+    `Sitemap Rows (${sitemapRows.length} rows):\n${sitemapRows
+      .map((row) => {
+        const l3 =
+          Array.isArray(row.l3_suggested_keywords) && row.l3_suggested_keywords.length
+            ? row.l3_suggested_keywords.join(' ; ')
+            : '—';
+        return `- ${row.slug_and_path} | section: ${row.section} | subsection: ${row.sub_section_or_category || '—'} | title: ${row.page_title} | dimension: ${row.dimension_name || '—'} | page_type: ${row.page_type} | keyword_group: ${row.keyword_group} | l3: ${l3} | source: ${row.source}`;
+      })
+      .join('\n')}`
+  );
+  return parts.join('\n\n');
+}
+
+function buildKeywordToSitemapMatchingUserMessage(
+  formData: Record<string, any>,
+  sitemapRows: SitemapRow[],
+  keywords: GroupingKeywordInput[]
+): string {
+  const parts = [buildTopicUniverseUserMessage(formData)];
+  parts.push(
+    `Current Sitemap (${sitemapRows.length} rows):\n${sitemapRows
+      .map((row) => {
+        const l3 =
+          Array.isArray(row.l3_suggested_keywords) && row.l3_suggested_keywords.length
+            ? row.l3_suggested_keywords.join(' ; ')
+            : '—';
+        return `- ${row.slug_and_path} | ${row.section} | ${row.sub_section_or_category || '—'} | ${row.page_title} | dimension: ${row.dimension_name || '—'} | page_type: ${row.page_type} | keyword_group: ${row.keyword_group} | l3: ${l3} | source: ${row.source}`;
+      })
+      .join('\n')}`
+  );
+  parts.push(
+    `Keyword List (${keywords.length}):\n${keywords
+      .map((keyword) => `- ${keyword.keyword} | ${typeof keyword.search_volume === 'number' ? keyword.search_volume : '-'}`)
+      .join('\n')}`
+  );
   return parts.join('\n\n');
 }
 
@@ -1139,6 +1244,207 @@ keywordRouter.post('/seeds', async (req: Request, res: Response) => {
     });
   } catch (err) {
     console.error('Seed generation error:', err);
+    const status = (err as any).code === 'auth_error' ? 401
+      : (err as any).code === 'rate_limit' ? 429
+      : 500;
+    res.status(status).json(errorResponse(err));
+  }
+});
+
+keywordRouter.post('/topic-universe', async (req: Request, res: Response) => {
+  try {
+    const { formData } = req.body;
+    const validationError = validateFormData(formData);
+    if (validationError) {
+      res.status(400).json({ error: validationError, code: 'validation' });
+      return;
+    }
+
+    const result = await generateOnly(getTopicUniversePrompt(), buildTopicUniverseUserMessage(formData), {
+      jsonSchema: getTopicUniverseJsonSchema(),
+    });
+    const rows = parseTopicUniverseOutput(result.result);
+    const csv = renderTopicUniverseCsv(rows);
+
+    res.json({
+      success: true,
+      result: {
+        rows,
+        csv,
+        row_count: rows.length,
+      },
+      raw: result.result,
+    });
+  } catch (err) {
+    console.error('Topic Universe generation error:', err);
+    const status = (err as any).code === 'auth_error' ? 401
+      : (err as any).code === 'rate_limit' ? 429
+      : 500;
+    res.status(status).json(errorResponse(err));
+  }
+});
+
+keywordRouter.post('/sitemap-from-universe', async (req: Request, res: Response) => {
+  try {
+    const { formData, topicUniverse } = req.body;
+    const validationError = validateFormData(formData);
+    if (validationError) {
+      res.status(400).json({ error: validationError, code: 'validation' });
+      return;
+    }
+
+    const topicUniverseRows = Array.isArray(topicUniverse?.rows) ? topicUniverse.rows : Array.isArray(topicUniverse) ? topicUniverse : [];
+    if (!Array.isArray(topicUniverseRows) || !topicUniverseRows.length) {
+      res.status(400).json({ error: 'topicUniverse rows are required', code: 'validation' });
+      return;
+    }
+
+    const normalizedRows: TopicUniverseRow[] = topicUniverseRows.map((row: any, index: number) => ({
+      index: typeof row?.index === 'number' ? row.index : index + 1,
+      dimension_name: String(row?.dimension_name || '').trim(),
+      what_it_covers: String(row?.what_it_covers || '').trim(),
+      example_search_queries: Array.isArray(row?.example_search_queries)
+        ? row.example_search_queries.map((value: unknown) => String(value || '').trim()).filter(Boolean)
+        : [],
+      primary_intent: (String(row?.primary_intent || '').trim().toUpperCase() || 'I') as TopicUniverseRow['primary_intent'],
+    })).filter((row) => row.dimension_name && row.what_it_covers);
+
+    const result = await generateOnly(
+      getSitemapFromTopicUniversePrompt(),
+      buildSitemapFromTopicUniverseUserMessage(formData, normalizedRows),
+      { jsonSchema: getSitemapRowsJsonSchema() }
+    );
+    const rows = parseSitemapRowsOutput(result.result);
+    const csv = renderSitemapRowsCsv(rows);
+
+    res.json({
+      success: true,
+      result: {
+        rows,
+        csv,
+        row_count: rows.length,
+      },
+      raw: result.result,
+    });
+  } catch (err) {
+    console.error('Sitemap-from-universe generation error:', err);
+    const status = (err as any).code === 'auth_error' ? 401
+      : (err as any).code === 'rate_limit' ? 429
+      : 500;
+    res.status(status).json(errorResponse(err));
+  }
+});
+
+keywordRouter.post('/seeds-from-sitemap', async (req: Request, res: Response) => {
+  try {
+    const { formData, sitemapRows } = req.body;
+    const validationError = validateFormData(formData);
+    if (validationError) {
+      res.status(400).json({ error: validationError, code: 'validation' });
+      return;
+    }
+
+    const rows = Array.isArray(sitemapRows?.rows) ? sitemapRows.rows : Array.isArray(sitemapRows) ? sitemapRows : [];
+    if (!Array.isArray(rows) || !rows.length) {
+      res.status(400).json({ error: 'sitemapRows are required', code: 'validation' });
+      return;
+    }
+
+    const normalizedRows: SitemapRow[] = rows.map((row: any) => ({
+      section: String(row?.section || '').trim(),
+      sub_section_or_category: String(row?.sub_section_or_category || '').trim(),
+      page_title: String(row?.page_title || '').trim(),
+      slug_and_path: String(row?.slug_and_path || '').trim(),
+      dimension_name: String(row?.dimension_name || '').trim() || null,
+      page_type: String(row?.page_type || '').trim() as SitemapRow['page_type'],
+      keyword_group: (String(row?.keyword_group || '').trim() || '—') as SitemapRow['keyword_group'],
+      l3_suggested_keywords: Array.isArray(row?.l3_suggested_keywords)
+        ? row.l3_suggested_keywords.map((value: unknown) => String(value || '').trim()).filter(Boolean)
+        : '—',
+      source: (row?.source === 'business_page' ? 'business_page' : 'topic_page') as SitemapRow['source'],
+    })).filter((row) => row.section && row.page_title && row.slug_and_path);
+
+    const result = await generateOnly(
+      getSeedFromSitemapPrompt(),
+      buildSeedFromSitemapUserMessage(formData, normalizedRows),
+      { jsonSchema: getSitemapSeedPlanJsonSchema() }
+    );
+    const plan: SitemapSeedPlan = parseSitemapSeedPlanOutput(result.result);
+    const csv = renderSitemapSeedCoverageCsv(plan);
+
+    res.json({
+      success: true,
+      result: {
+        ...plan,
+        csv,
+        seed_count: plan.seeds.length,
+        coverage_row_count: plan.coverage.length,
+      },
+      raw: result.result,
+    });
+  } catch (err) {
+    console.error('Seed-from-sitemap generation error:', err);
+    const status = (err as any).code === 'auth_error' ? 401
+      : (err as any).code === 'rate_limit' ? 429
+      : 500;
+    res.status(status).json(errorResponse(err));
+  }
+});
+
+keywordRouter.post('/match-to-sitemap', async (req: Request, res: Response) => {
+  try {
+    const { formData, sitemapRows, keywords } = req.body;
+    const validationError = validateFormData(formData);
+    if (validationError) {
+      res.status(400).json({ error: validationError, code: 'validation' });
+      return;
+    }
+
+    const rows = Array.isArray(sitemapRows?.rows) ? sitemapRows.rows : Array.isArray(sitemapRows) ? sitemapRows : [];
+    if (!Array.isArray(rows) || !rows.length) {
+      res.status(400).json({ error: 'sitemapRows are required', code: 'validation' });
+      return;
+    }
+    if (!Array.isArray(keywords) || !keywords.length) {
+      res.status(400).json({ error: 'keywords are required', code: 'validation' });
+      return;
+    }
+
+    const normalizedRows: SitemapRow[] = rows.map((row: any) => ({
+      section: String(row?.section || '').trim(),
+      sub_section_or_category: String(row?.sub_section_or_category || '').trim(),
+      page_title: String(row?.page_title || '').trim(),
+      slug_and_path: String(row?.slug_and_path || '').trim(),
+      dimension_name: String(row?.dimension_name || '').trim() || null,
+      page_type: String(row?.page_type || '').trim() as SitemapRow['page_type'],
+      keyword_group: (String(row?.keyword_group || '').trim() || '—') as SitemapRow['keyword_group'],
+      l3_suggested_keywords: Array.isArray(row?.l3_suggested_keywords)
+        ? row.l3_suggested_keywords.map((value: unknown) => String(value || '').trim()).filter(Boolean)
+        : '—',
+      source: (row?.source === 'business_page' ? 'business_page' : 'topic_page') as SitemapRow['source'],
+    })).filter((row) => row.section && row.page_title && row.slug_and_path);
+
+    const result = await generateOnly(
+      getKeywordToSitemapMatchingPrompt(),
+      buildKeywordToSitemapMatchingUserMessage(formData, normalizedRows, keywords),
+      { jsonSchema: getSitemapMatchingJsonSchema() }
+    );
+    const matchingResult: SitemapMatchingResult = parseSitemapMatchingOutput(result.result);
+    const csv = renderSitemapMatchingCsv(matchingResult);
+
+    res.json({
+      success: true,
+      result: {
+        ...matchingResult,
+        csv,
+        row_count: matchingResult.rows.length,
+        unmatched_keyword_count: matchingResult.unmatched_keywords.length,
+        new_rows_added: matchingResult.rows.filter((row) => row.row_origin === 'added_during_matching').length,
+      },
+      raw: result.result,
+    });
+  } catch (err) {
+    console.error('Keyword-to-sitemap matching error:', err);
     const status = (err as any).code === 'auth_error' ? 401
       : (err as any).code === 'rate_limit' ? 429
       : 500;

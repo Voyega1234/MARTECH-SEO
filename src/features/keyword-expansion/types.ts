@@ -16,6 +16,116 @@ export interface SeedKeywordResponse {
   raw: string;
 }
 
+export type TopicUniverseIntent = 'T' | 'C' | 'I' | 'N';
+
+export interface TopicUniverseRow {
+  index: number;
+  dimension_name: string;
+  what_it_covers: string;
+  example_search_queries: string[];
+  primary_intent: TopicUniverseIntent;
+}
+
+export interface TopicUniverseResponse {
+  success: boolean;
+  result: {
+    rows: TopicUniverseRow[];
+    csv: string;
+    row_count: number;
+  };
+  raw: string;
+}
+
+export type SitemapPageType =
+  | 'Homepage'
+  | 'Category Page'
+  | 'Service Page'
+  | 'Location Page'
+  | 'Comparison Page'
+  | 'Guide'
+  | 'FAQ'
+  | 'Calculator / Tool'
+  | 'Brand/Provider Page'
+  | 'Lead Form'
+  | 'Supporting Page';
+
+export type SitemapRowSource = 'topic_page' | 'business_page';
+
+export interface SitemapRow {
+  section: string;
+  sub_section_or_category: string;
+  page_title: string;
+  slug_and_path: string;
+  dimension_name: string | null;
+  page_type: SitemapPageType;
+  keyword_group: string | '—';
+  l3_suggested_keywords: string[] | '—';
+  source: SitemapRowSource;
+}
+
+export interface SitemapRowsResponse {
+  success: boolean;
+  result: {
+    rows: SitemapRow[];
+    csv: string;
+    row_count: number;
+  };
+  raw: string;
+}
+
+export interface SitemapSeedCoverageRow {
+  slug_and_path: string;
+  dimension_name: string | null;
+  coverage_status: 'seeded' | 'intentionally_unseeded';
+  covering_seeds: string[];
+  reason_if_unseeded: string | null;
+}
+
+export interface SitemapSeedPlanResponse {
+  success: boolean;
+  result: {
+    seeds: string[];
+    coverage: SitemapSeedCoverageRow[];
+    csv: string;
+    seed_count: number;
+    coverage_row_count: number;
+  };
+  raw: string;
+}
+
+export interface SitemapMatchedKeyword {
+  keyword: string;
+  search_volume: number | '-';
+}
+
+export interface SitemapMatchRow {
+  section: string;
+  sub_section_or_category: string;
+  page_title: string;
+  slug_and_path: string;
+  dimension_name: string | null;
+  page_type: SitemapPageType;
+  keyword_group: string | '—';
+  l3_keywords_top_5: SitemapMatchedKeyword[];
+  matched_keywords: SitemapMatchedKeyword[];
+  matching_note: string | null;
+  row_origin: 'original' | 'added_during_matching';
+  source: SitemapRowSource;
+}
+
+export interface SitemapMatchingResponse {
+  success: boolean;
+  result: {
+    rows: SitemapMatchRow[];
+    unmatched_keywords: SitemapMatchedKeyword[];
+    csv: string;
+    row_count: number;
+    unmatched_keyword_count: number;
+    new_rows_added: number;
+  };
+  raw: string;
+}
+
 export interface KeywordRelevanceFilterResponse {
   success: boolean;
   relevant_keywords: KeywordExpansionKeywordRow[];

@@ -22,7 +22,7 @@ export function Sidebar({ steps, onStepClick, allowPendingClicks = false }: Side
         const isActive = step.state === 'active';
         const isComplete = step.state === 'complete';
         const isPending = step.state === 'pending';
-        const isClickable = allowPendingClicks || !isPending || step.id === 'seeds';
+        const isClickable = allowPendingClicks || !isPending || step.id === 'topic-universe';
 
         return (
           <button

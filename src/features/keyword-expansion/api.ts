@@ -11,6 +11,12 @@ import type {
   KeywordExpansionKeywordRow,
   KeywordRelevanceFilterResponse,
   SeedKeywordResponse,
+  SitemapMatchingResponse,
+  SitemapRow,
+  SitemapRowsResponse,
+  SitemapSeedPlanResponse,
+  TopicUniverseResponse,
+  TopicUniverseRow,
 } from './types';
 
 const STEP2_API_BASE = (
@@ -64,6 +70,72 @@ export async function generateSeedKeywords(formData: Record<string, any>): Promi
 
   if (!res.ok) {
     throw new Error(`Seed generation error: ${res.status}`);
+  }
+
+  return res.json();
+}
+
+export async function generateTopicUniverse(formData: Record<string, any>): Promise<TopicUniverseResponse> {
+  const res = await fetch(`${STEP3_API_BASE}/topic-universe`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ formData }),
+  });
+
+  if (!res.ok) {
+    throw new Error(`Topic universe generation error: ${res.status}`);
+  }
+
+  return res.json();
+}
+
+export async function generateSitemapFromUniverse(
+  formData: Record<string, any>,
+  topicUniverse: { rows: TopicUniverseRow[] } | TopicUniverseRow[]
+): Promise<SitemapRowsResponse> {
+  const res = await fetch(`${STEP3_API_BASE}/sitemap-from-universe`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ formData, topicUniverse }),
+  });
+
+  if (!res.ok) {
+    throw new Error(`Sitemap-from-universe generation error: ${res.status}`);
+  }
+
+  return res.json();
+}
+
+export async function generateSeedsFromSitemap(
+  formData: Record<string, any>,
+  sitemapRows: { rows: SitemapRow[] } | SitemapRow[]
+): Promise<SitemapSeedPlanResponse> {
+  const res = await fetch(`${STEP3_API_BASE}/seeds-from-sitemap`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ formData, sitemapRows }),
+  });
+
+  if (!res.ok) {
+    throw new Error(`Seed-from-sitemap generation error: ${res.status}`);
+  }
+
+  return res.json();
+}
+
+export async function matchKeywordsToSitemap(
+  formData: Record<string, any>,
+  sitemapRows: { rows: SitemapRow[] } | SitemapRow[],
+  keywords: KeywordExpansionKeywordRow[]
+): Promise<SitemapMatchingResponse> {
+  const res = await fetch(`${STEP3_API_BASE}/match-to-sitemap`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ formData, sitemapRows, keywords }),
+  });
+
+  if (!res.ok) {
+    throw new Error(`Keyword-to-sitemap matching error: ${res.status}`);
   }
 
   return res.json();

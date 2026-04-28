@@ -7,6 +7,7 @@
     "dev": "vite --port=3000 --host=0.0.0.0",
     "dev:server": "kill $(lsof -ti:3001) 2>/dev/null; tsx --watch server/index.ts",
     "dev:all": "npm run dev:server & npm run dev",
+    "dev:full": "scripts/dev-all-with-step2.sh",
     "build": "vite build",
     "preview": "vite preview",
     "clean": "rm -rf dist",
