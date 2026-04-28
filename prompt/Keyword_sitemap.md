@@ -6,6 +6,10 @@ Instructions:
 1.Group keywords into logical sections based on user intent. Categories should include: Home, Services, Pricing, Blog, Tools, Supporting Pages.
 2.Define the page type for each group: Homepage, Category, Service Page, Blog, Tool, or Supporting Page.
 3.Create a clear Page Title and SEO-friendly slug/path. Ensure proper logical nesting (e.g., /services/category/topic).
+3.1 Slug and path must be lowercase English only.
+3.2 Do not use Thai characters in `slug_and_path`.
+3.3 Use only `a-z`, `0-9`, and hyphens in each slug segment.
+3.4 If the keyword is Thai, translate the concept into natural English for the slug instead of transliterating Thai text.
 4.Add supporting pages (About Us, FAQ, Contact, Case Studies) only when they enhance UX or trust.
 5.Map Level 3 keywords to each page, with volume. If position data is available in the input, include it; otherwise, omit it. Do not invent position data.
 6.Ensure each entry has exactly one primary keyword_group.

@@ -79,20 +79,50 @@ function compactText(value: unknown): string {
   return typeof value === 'string' ? value.replace(/\s+/g, ' ').trim() : '';
 }
 
+function slugifyEnglishSegment(value: string): string {
+  return compactText(value)
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/&/g, ' and ')
+    .replace(/[_/]+/g, ' ')
+    .replace(/[^a-z0-9\s-]/g, ' ')
+    .trim()
+    .replace(/\s+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '');
+}
+
+function sanitizeEnglishPath(value: string): string {
+  const raw = compactText(value);
+  if (!raw || raw === '/') return '';
+
+  return raw
+    .split('/')
+    .map((segment) => slugifyEnglishSegment(segment))
+    .filter(Boolean)
+    .join('/');
+}
+
+function buildFallbackEnglishPath(source: string): string {
+  const normalized = slugifyEnglishSegment(source);
+  if (normalized) return normalized;
+
+  const hash = Array.from(compactText(source)).reduce((acc, char) => {
+    return (acc * 31 + char.charCodeAt(0)) % 1000000;
+  }, 0);
+
+  return `page-${String(hash).padStart(6, '0')}`;
+}
+
 function normalizePath(path: string, fallbackKeywordGroup: string): string {
-  const raw = compactText(path);
-  if (raw) {
-    const trimmed = raw.replace(/^\/+|\/+$/g, '');
-    return trimmed ? `/${trimmed}/` : '/';
+  const rawPath = sanitizeEnglishPath(path);
+  if (rawPath) {
+    return `/${rawPath}/`;
   }
 
-  const slug = fallbackKeywordGroup
-    .toLowerCase()
-    .replace(/[^a-z0-9\u0E00-\u0E7F\s-]/g, '')
-    .trim()
-    .replace(/\s+/g, '-');
-
-  return slug ? `/${slug}/` : '/';
+  const fallbackPath = buildFallbackEnglishPath(fallbackKeywordGroup);
+  return `/${fallbackPath}/`;
 }
 
 function numericVolume(value: number | string): number {
