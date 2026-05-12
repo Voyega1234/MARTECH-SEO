@@ -261,6 +261,7 @@ export default function NewApp() {
   );
   const [preRelevanceCompetitorMaxRank, setPreRelevanceCompetitorMaxRank] = useState('');
   const [preRelevanceClientMaxRank, setPreRelevanceClientMaxRank] = useState('');
+  const [enableRelevanceFilter, setEnableRelevanceFilter] = useState(false);
   const [showAdvancedExpansionOptions, setShowAdvancedExpansionOptions] = useState(false);
 
   const seedKeywords = useMemo(
@@ -631,28 +632,43 @@ export default function NewApp() {
           throw new Error('Pre-filter removed all keywords. Lower the min volume or relax the rank filters.');
         }
 
-        setJob({
-          ...completedJob,
-          status: 'running',
-          progress: {
-            ...completedJob.progress,
-            phase: 'relevance_filter',
-            message:
-              prefilteredKeywords.length === originalKeywordCount
-                ? `Checking relevance for ${prefilteredKeywords.length} keywords with Claude Haiku 4.5`
-                : `Checking relevance for ${prefilteredKeywords.length} of ${originalKeywordCount} keywords after pre-filter`,
-            current_item: null,
-          },
-        });
-        const relevanceResult = await filterRelevantKeywords(formData, prefilteredKeywords);
-        nextExpandedResult = {
-          ...nextExpandedResult,
-          summary: {
-            ...nextExpandedResult.summary,
-            deduped_keywords: relevanceResult.relevant_keyword_count,
-          },
-          keywords: relevanceResult.relevant_keywords,
-        };
+        if (enableRelevanceFilter) {
+          setJob({
+            ...completedJob,
+            status: 'running',
+            progress: {
+              ...completedJob.progress,
+              phase: 'relevance_filter',
+              message:
+                prefilteredKeywords.length === originalKeywordCount
+                  ? `Checking relevance for ${prefilteredKeywords.length} keywords with Claude`
+                  : `Checking relevance for ${prefilteredKeywords.length} of ${originalKeywordCount} keywords after pre-filter`,
+              current_item: null,
+            },
+          });
+          const relevanceResult = await filterRelevantKeywords(formData, prefilteredKeywords);
+          nextExpandedResult = {
+            ...nextExpandedResult,
+            summary: {
+              ...nextExpandedResult.summary,
+              deduped_keywords: relevanceResult.relevant_keyword_count,
+            },
+            keywords: relevanceResult.relevant_keywords,
+          };
+        } else {
+          nextExpandedResult = {
+            ...nextExpandedResult,
+            summary: {
+              ...nextExpandedResult.summary,
+              deduped_keywords: prefilteredKeywords.length,
+            },
+            metadata: {
+              ...nextExpandedResult.metadata,
+              relevant_keyword_count: prefilteredKeywords.length,
+            },
+            keywords: prefilteredKeywords,
+          };
+        }
       }
 
       setJob({
@@ -662,7 +678,9 @@ export default function NewApp() {
           ...completedJob.progress,
           phase: 'completed',
           message: nextExpandedResult?.keywords?.length
-            ? `Keyword expansion complete. Relevant keyword set prepared (${nextExpandedResult.keywords.length} keywords).`
+            ? enableRelevanceFilter
+              ? `Keyword expansion complete. Relevant keyword set prepared (${nextExpandedResult.keywords.length} keywords).`
+              : `Keyword expansion complete. Claude relevance filter skipped (${nextExpandedResult.keywords.length} keywords retained).`
             : completedJob.progress.message,
         },
       });
@@ -1443,6 +1461,22 @@ export default function NewApp() {
 
                           {showAdvancedExpansionOptions ? (
                             <div className="grid gap-3 border-t border-[#f1f1f4] px-3 py-3">
+                            <label className="flex items-start gap-3 rounded-lg border border-[#edf0f3] bg-white px-3 py-2.5">
+                              <input
+                                type="checkbox"
+                                checked={enableRelevanceFilter}
+                                onChange={(e) => setEnableRelevanceFilter(e.target.checked)}
+                                className="mt-1 accent-[#0071e3]"
+                              />
+                              <div>
+                                <div className="text-[12px] font-semibold text-[#1d1d1f]">
+                                  Use Claude relevance filter
+                                </div>
+                                <div className="text-[11px] text-[#8e8e93] mt-0.5 leading-5">
+                                  When off, Step 2 keeps the pre-filtered keyword set and skips `/api/keywords/relevance-filter`.
+                                </div>
+                              </div>
+                            </label>
                             <div className="grid gap-3 sm:grid-cols-3">
                               <div>
                                 <div className="text-[11px] uppercase tracking-[0.6px] text-[#8e8e93] mb-1.5">
@@ -1485,7 +1519,7 @@ export default function NewApp() {
                               </div>
                             </div>
                             <div className="text-[11px] text-[#8e8e93] leading-5">
-                              These filters are applied after Step 2 finishes and before sending keywords into the relevance check.
+                              These filters are applied after Step 2 finishes. If Claude relevance filter is off, these filters become the final keyword cleanup step.
                             </div>
                             </div>
                           ) : null}

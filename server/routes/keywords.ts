@@ -259,9 +259,45 @@ type GroupingKeywordInput = {
 
 type RelevanceKeywordInput = GroupingKeywordInput;
 
-const RELEVANCE_FILTER_BATCH_SIZE = 500;
+const RELEVANCE_FILTER_BATCH_SIZE = 250;
 const RELEVANCE_FILTER_MODEL = process.env.CLAUDE_RELEVANCE_MODEL || 'claude-haiku-4-5';
 const MAX_GROUPING_FINAL_KEYWORDS_PER_BATCH = 1000;
+
+function logRelevanceFilter(event: string, payload: Record<string, unknown> = {}) {
+  console.log(
+    JSON.stringify({
+      scope: 'keyword-relevance-filter',
+      event,
+      timestamp: new Date().toISOString(),
+      ...payload,
+    })
+  );
+}
+
+function serializeRelevanceError(err: unknown): Record<string, unknown> {
+  if (err instanceof AgentError) {
+    return {
+      name: err.name,
+      message: err.message,
+      code: err.code,
+      userMessage: err.userMessage,
+      retryable: err.retryable,
+      stack: err.stack,
+    };
+  }
+
+  if (err instanceof Error) {
+    return {
+      name: err.name,
+      message: err.message,
+      stack: err.stack,
+    };
+  }
+
+  return {
+    message: String(err),
+  };
+}
 
 function chunkGroupingPlanKeywords(
   keywords: GroupingKeywordInput[],
@@ -1045,15 +1081,31 @@ keywordRouter.post('/grouping-jobs', async (req: Request, res: Response) => {
 });
 
 keywordRouter.post('/relevance-filter', async (req: Request, res: Response) => {
+  const requestId = typeof req.headers['x-request-id'] === 'string'
+    ? req.headers['x-request-id']
+    : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+
   try {
     const { formData, keywords } = req.body;
+    logRelevanceFilter('request_received', {
+      requestId,
+      method: req.method,
+      keywordCount: Array.isArray(keywords) ? keywords.length : null,
+      hasAnthropicKey: Boolean(process.env.ANTHROPIC_API_KEY),
+      model: RELEVANCE_FILTER_MODEL,
+      batchSize: RELEVANCE_FILTER_BATCH_SIZE,
+      businessName: formData?.businessName || null,
+    });
+
     const validationError = validateFormData(formData);
     if (validationError) {
+      logRelevanceFilter('validation_failed', { requestId, validationError });
       res.status(400).json({ error: validationError, code: 'validation' });
       return;
     }
 
     if (!Array.isArray(keywords) || !keywords.length) {
+      logRelevanceFilter('validation_failed', { requestId, validationError: 'keywords are required' });
       res.status(400).json({ error: 'keywords are required', code: 'validation' });
       return;
     }
@@ -1066,17 +1118,48 @@ keywordRouter.post('/relevance-filter', async (req: Request, res: Response) => {
     for (let batchIndex = 0; batchIndex < keywordBatches.length; batchIndex += 1) {
       const batch = keywordBatches[batchIndex];
       const userMessage = buildKeywordRelevanceUserMessage(formData, batch);
-      const result = await generateOnly(systemPrompt, userMessage, {
-        model: RELEVANCE_FILTER_MODEL,
-        jsonSchema: getKeywordRelevanceFilterJsonSchema(),
+      logRelevanceFilter('batch_started', {
+        requestId,
+        batchIndex: batchIndex + 1,
+        batchCount: keywordBatches.length,
+        batchKeywordCount: batch.length,
       });
+
+      let result;
+      try {
+        result = await generateOnly(systemPrompt, userMessage, {
+          model: RELEVANCE_FILTER_MODEL,
+          jsonSchema: getKeywordRelevanceFilterJsonSchema(),
+        });
+      } catch (err) {
+        logRelevanceFilter('claude_call_failed', {
+          requestId,
+          batchIndex: batchIndex + 1,
+          error: serializeRelevanceError(err),
+        });
+        throw err;
+      }
+
       const relevantIndexes = parseRelevantIndexes(result.result, batch.length);
       rawParts.push(`Batch ${batchIndex + 1}/${keywordBatches.length}\n${result.result}`);
 
       for (const index of relevantIndexes) {
         relevantKeywords.push(batch[index]);
       }
+
+      logRelevanceFilter('batch_completed', {
+        requestId,
+        batchIndex: batchIndex + 1,
+        relevantKeywordCount: relevantIndexes.length,
+      });
     }
+
+    logRelevanceFilter('request_completed', {
+      requestId,
+      inputKeywordCount: keywords.length,
+      relevantKeywordCount: relevantKeywords.length,
+      batchCount: keywordBatches.length,
+    });
 
     res.json({
       success: true,
@@ -1087,6 +1170,10 @@ keywordRouter.post('/relevance-filter', async (req: Request, res: Response) => {
       raw: rawParts.join('\n\n'),
     });
   } catch (err) {
+    logRelevanceFilter('request_failed', {
+      requestId,
+      error: serializeRelevanceError(err),
+    });
     console.error('Relevance filter error:', err);
     const status = (err as any).code === 'auth_error' ? 401
       : (err as any).code === 'rate_limit' ? 429

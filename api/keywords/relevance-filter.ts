@@ -8,8 +8,44 @@ type RelevanceKeywordInput = {
   search_volume: number | '-' | null | undefined;
 };
 
-const RELEVANCE_FILTER_BATCH_SIZE = 500;
+const RELEVANCE_FILTER_BATCH_SIZE = 250;
 const RELEVANCE_FILTER_MODEL = process.env.CLAUDE_RELEVANCE_MODEL || 'claude-haiku-4-5';
+
+function logRelevanceFilter(event: string, payload: Record<string, unknown> = {}) {
+  console.log(
+    JSON.stringify({
+      scope: 'keyword-relevance-filter',
+      event,
+      timestamp: new Date().toISOString(),
+      ...payload,
+    })
+  );
+}
+
+function serializeError(err: unknown): Record<string, unknown> {
+  if (err instanceof AgentError) {
+    return {
+      name: err.name,
+      message: err.message,
+      code: err.code,
+      userMessage: err.userMessage,
+      retryable: err.retryable,
+      stack: err.stack,
+    };
+  }
+
+  if (err instanceof Error) {
+    return {
+      name: err.name,
+      message: err.message,
+      stack: err.stack,
+    };
+  }
+
+  return {
+    message: String(err),
+  };
+}
 
 function extractJsonObject(text: string): string {
   const trimmed = text.trim();
@@ -140,18 +176,34 @@ function errorResponse(err: any) {
 }
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
+  const requestId = typeof req.headers['x-vercel-id'] === 'string'
+    ? req.headers['x-vercel-id']
+    : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed' });
   }
 
   try {
     const { formData, keywords } = req.body;
+    logRelevanceFilter('request_received', {
+      requestId,
+      method: req.method,
+      keywordCount: Array.isArray(keywords) ? keywords.length : null,
+      hasAnthropicKey: Boolean(process.env.ANTHROPIC_API_KEY),
+      model: RELEVANCE_FILTER_MODEL,
+      batchSize: RELEVANCE_FILTER_BATCH_SIZE,
+      businessName: formData?.businessName || null,
+    });
+
     const validationError = validateFormData(formData);
     if (validationError) {
+      logRelevanceFilter('validation_failed', { requestId, validationError });
       return res.status(400).json({ error: validationError, code: 'validation' });
     }
 
     if (!Array.isArray(keywords) || !keywords.length) {
+      logRelevanceFilter('validation_failed', { requestId, validationError: 'keywords are required' });
       return res.status(400).json({ error: 'keywords are required', code: 'validation' });
     }
 
@@ -163,17 +215,48 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     for (let batchIndex = 0; batchIndex < keywordBatches.length; batchIndex += 1) {
       const batch = keywordBatches[batchIndex];
       const userMessage = buildKeywordRelevanceUserMessage(formData, batch);
-      const result = await generateOnly(systemPrompt, userMessage, {
-        model: RELEVANCE_FILTER_MODEL,
-        jsonSchema: getKeywordRelevanceFilterJsonSchema(),
+      logRelevanceFilter('batch_started', {
+        requestId,
+        batchIndex: batchIndex + 1,
+        batchCount: keywordBatches.length,
+        batchKeywordCount: batch.length,
       });
+
+      let result;
+      try {
+        result = await generateOnly(systemPrompt, userMessage, {
+          model: RELEVANCE_FILTER_MODEL,
+          jsonSchema: getKeywordRelevanceFilterJsonSchema(),
+        });
+      } catch (err) {
+        logRelevanceFilter('claude_call_failed', {
+          requestId,
+          batchIndex: batchIndex + 1,
+          error: serializeError(err),
+        });
+        throw err;
+      }
+
       const relevantIndexes = parseRelevantIndexes(result.result, batch.length);
       rawParts.push(`Batch ${batchIndex + 1}/${keywordBatches.length}\n${result.result}`);
 
       for (const index of relevantIndexes) {
         relevantKeywords.push(batch[index]);
       }
+
+      logRelevanceFilter('batch_completed', {
+        requestId,
+        batchIndex: batchIndex + 1,
+        relevantKeywordCount: relevantIndexes.length,
+      });
     }
+
+    logRelevanceFilter('request_completed', {
+      requestId,
+      inputKeywordCount: keywords.length,
+      relevantKeywordCount: relevantKeywords.length,
+      batchCount: keywordBatches.length,
+    });
 
     return res.json({
       success: true,
@@ -184,6 +267,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       raw: rawParts.join('\n\n'),
     });
   } catch (err) {
+    logRelevanceFilter('request_failed', {
+      requestId,
+      error: serializeError(err),
+    });
     console.error('Relevance filter error:', err);
     const status = (err as any).code === 'auth_error' ? 401
       : (err as any).code === 'rate_limit' ? 429

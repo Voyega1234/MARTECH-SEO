@@ -19,7 +19,7 @@ const STEP2_API_BASE = (
 const STEP3_API_BASE = (
   import.meta.env.VITE_STEP3_API_BASE_URL || '/api/keywords'
 ).replace(/\/$/, '');
-const CLIENT_RELEVANCE_FILTER_BATCH_SIZE = 2000;
+const CLIENT_RELEVANCE_FILTER_BATCH_SIZE = 500;
 const localGroupingJobs = new Map<string, KeywordGroupingJobDetail>();
 const localPaaBlogJobs = new Map<string, PaaBlogJobDetail>();
 
@@ -100,7 +100,7 @@ export async function filterRelevantKeywords(
       try {
         const errorPayload = await res.json();
         if (errorPayload?.error) {
-          message = errorPayload.error;
+          message = `Keyword relevance filter error: ${errorPayload.error}`;
         }
       } catch {
         // ignore parse failures and keep default message
