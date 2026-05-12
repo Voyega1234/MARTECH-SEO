@@ -14,7 +14,7 @@ import type {
 } from './types';
 
 const STEP2_API_BASE = (
-  import.meta.env.VITE_STEP2_API_BASE_URL || '/api/step2'
+  import.meta.env.VITE_STEP2_API_BASE_URL || '/api/step2-proxy'
 ).replace(/\/$/, '');
 const STEP3_API_BASE = (
   import.meta.env.VITE_STEP3_API_BASE_URL || '/api/keywords'
@@ -42,10 +42,17 @@ function buildRequestBody(input: KeywordExpansionJobRequest) {
   };
 }
 
+function step2Url(path: string): string {
+  if (STEP2_API_BASE.includes('/api/step2-proxy')) {
+    return `${STEP2_API_BASE}?path=${encodeURIComponent(path)}`;
+  }
+  return `${STEP2_API_BASE}${path}`;
+}
+
 export async function createKeywordExpansionJob(
   input: KeywordExpansionJobRequest
 ): Promise<KeywordExpansionJobCreated> {
-  const res = await fetch(`${STEP2_API_BASE}/jobs/expand`, {
+  const res = await fetch(step2Url('/jobs/expand'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(buildRequestBody(input)),
@@ -118,7 +125,7 @@ export async function filterRelevantKeywords(
 }
 
 export async function getKeywordExpansionJob(jobId: string): Promise<KeywordExpansionJob> {
-  const res = await fetch(`${STEP2_API_BASE}/jobs/${jobId}`);
+  const res = await fetch(step2Url(`/jobs/${jobId}`));
   if (!res.ok) {
     throw new Error(`Step 2 API error: ${res.status}`);
   }
@@ -126,7 +133,7 @@ export async function getKeywordExpansionJob(jobId: string): Promise<KeywordExpa
 }
 
 export async function getKeywordExpansionResult(jobId: string): Promise<KeywordExpansionJob> {
-  const res = await fetch(`${STEP2_API_BASE}/jobs/${jobId}/result`);
+  const res = await fetch(step2Url(`/jobs/${jobId}/result`));
   if (!res.ok) {
     throw new Error(`Step 2 API error: ${res.status}`);
   }
@@ -134,7 +141,7 @@ export async function getKeywordExpansionResult(jobId: string): Promise<KeywordE
 }
 
 export function getKeywordExpansionCsvUrl(jobId: string): string {
-  return `${STEP2_API_BASE}/jobs/${jobId}/csv`;
+  return step2Url(`/jobs/${jobId}/csv`);
 }
 
 export async function generateKeywordGroupingPlan(

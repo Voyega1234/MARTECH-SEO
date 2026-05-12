@@ -4,6 +4,7 @@ import dotenv from 'dotenv';
 import { keywordRouter } from './routes/keywords.ts';
 import { sitemapRouter } from './routes/sitemap.ts';
 import { step2ProxyRouter } from './routes/step2Proxy.ts';
+import { step2ProxyQueryRouter } from './routes/step2ProxyQuery.ts';
 
 dotenv.config();
 
@@ -14,6 +15,7 @@ app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 
 // Routes
+app.use('/api/step2-proxy', step2ProxyQueryRouter);
 app.use('/api/step2', step2ProxyRouter);
 app.use('/api/keywords', keywordRouter);
 app.use('/api/sitemap', sitemapRouter);
