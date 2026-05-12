@@ -6,9 +6,11 @@ function getStep2Origin(): string {
   return (process.env.STEP2_API_ORIGIN || DEFAULT_STEP2_ORIGIN).replace(/\/$/, '');
 }
 
-function getProxyPath(value: string | string[] | undefined): string {
-  if (Array.isArray(value)) return value.join('/');
-  return value || '';
+function buildTargetUrl(req: VercelRequest): string {
+  const requestUrl = req.url || '';
+  const [pathname, query = ''] = requestUrl.split('?');
+  const proxyPath = pathname.replace(/^\/api\/step2\/?/, '');
+  return `${getStep2Origin()}/${proxyPath}${query ? `?${query}` : ''}`;
 }
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
@@ -16,19 +18,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     return res.status(204).end();
   }
 
-  const proxyPath = getProxyPath(req.query.path);
-  const searchParams = new URLSearchParams();
-
-  for (const [key, value] of Object.entries(req.query)) {
-    if (key === 'path') continue;
-    if (Array.isArray(value)) {
-      for (const item of value) searchParams.append(key, item);
-    } else if (typeof value === 'string') {
-      searchParams.append(key, value);
-    }
-  }
-
-  const targetUrl = `${getStep2Origin()}/${proxyPath}${searchParams.size ? `?${searchParams.toString()}` : ''}`;
+  const targetUrl = buildTargetUrl(req);
   const headers: HeadersInit = {
     'Content-Type': req.headers['content-type'] || 'application/json',
   };
