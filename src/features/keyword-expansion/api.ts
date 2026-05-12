@@ -20,6 +20,13 @@ const STEP3_API_BASE = (
   import.meta.env.VITE_STEP3_API_BASE_URL || '/api/keywords'
 ).replace(/\/$/, '');
 const CLIENT_RELEVANCE_FILTER_BATCH_SIZE = 2000;
+const localGroupingJobs = new Map<string, KeywordGroupingJobDetail>();
+const localPaaBlogJobs = new Map<string, PaaBlogJobDetail>();
+
+function createLocalJobId(prefix: string): string {
+  const randomId = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  return `${prefix}-${randomId}`;
+}
 
 function buildRequestBody(input: KeywordExpansionJobRequest) {
   return {
@@ -187,29 +194,44 @@ export async function createKeywordGroupingJob(
   formData: Record<string, any>,
   keywords: KeywordExpansionKeywordRow[]
 ): Promise<KeywordGroupingJobCreated> {
-  const res = await fetch(`${STEP3_API_BASE}/grouping-jobs`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ formData, keywords }),
+  const jobId = createLocalJobId('grouping');
+  const createdAt = new Date().toISOString();
+  const planResponse = await generateKeywordGroupingPlan(formData, keywords);
+  const finalResponse = await generateKeywordGroupingFinal(formData, planResponse.plan, keywords);
+  const completedAt = new Date().toISOString();
+
+  localGroupingJobs.set(jobId, {
+    job_id: jobId,
+    status: 'completed',
+    created_at: createdAt,
+    started_at: createdAt,
+    completed_at: completedAt,
+    progress: {
+      phase: 'completed',
+      total_plan_batches: planResponse.batch_count ?? 1,
+      completed_plan_batches: planResponse.batch_count ?? 1,
+      total_final_batches: finalResponse.result.batch_count,
+      completed_final_batches: finalResponse.result.batch_count,
+      current_batch: null,
+      input_keyword_count: keywords.length,
+      message: 'Keyword grouping complete',
+    },
+    error: null,
+    plan: planResponse.plan,
+    plan_raw: planResponse.raw,
+    result: finalResponse.result,
+    raw: finalResponse.raw,
   });
 
-  if (!res.ok) {
-    let message = `Grouping job error: ${res.status}`;
-    try {
-      const errorPayload = await res.json();
-      if (errorPayload?.error) {
-        message = errorPayload.error;
-      }
-    } catch {
-      // ignore parse failures and keep default message
-    }
-    throw new Error(message);
-  }
-
-  return res.json();
+  return { job_id: jobId, status: 'completed' };
 }
 
 export async function getKeywordGroupingJob(jobId: string): Promise<KeywordGroupingJobDetail> {
+  const localJob = localGroupingJobs.get(jobId);
+  if (localJob) {
+    return localJob;
+  }
+
   const res = await fetch(`${STEP3_API_BASE}/grouping-jobs/${jobId}`);
 
   if (!res.ok) {
@@ -232,7 +254,7 @@ export async function createPaaBlogJob(
   formData: Record<string, any>,
   keywordMap: KeywordGroupingFinalResponse['result'] | null
 ): Promise<PaaBlogJobCreated> {
-  const res = await fetch(`${STEP3_API_BASE}/paa-blog-jobs`, {
+  const res = await fetch(`${STEP3_API_BASE}/paa-blog`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ formData, keywordMap }),
@@ -251,10 +273,17 @@ export async function createPaaBlogJob(
     throw new Error(message);
   }
 
-  return res.json();
+  const detail: PaaBlogJobDetail = await res.json();
+  localPaaBlogJobs.set(detail.job_id, detail);
+  return { job_id: detail.job_id, status: detail.status };
 }
 
 export async function getPaaBlogJob(jobId: string): Promise<PaaBlogJobDetail> {
+  const localJob = localPaaBlogJobs.get(jobId);
+  if (localJob) {
+    return localJob;
+  }
+
   const res = await fetch(`${STEP3_API_BASE}/paa-blog-jobs/${jobId}`);
 
   if (!res.ok) {
