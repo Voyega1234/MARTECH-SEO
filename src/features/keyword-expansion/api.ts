@@ -14,7 +14,7 @@ import type {
 } from './types';
 
 const STEP2_API_BASE = (
-  import.meta.env.VITE_STEP2_API_BASE_URL || 'http://127.0.0.1:8010'
+  import.meta.env.VITE_STEP2_API_BASE_URL || '/api/step2'
 ).replace(/\/$/, '');
 const STEP3_API_BASE = (
   import.meta.env.VITE_STEP3_API_BASE_URL || '/api/keywords'
