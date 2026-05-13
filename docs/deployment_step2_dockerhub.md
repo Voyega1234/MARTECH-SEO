@@ -3,8 +3,9 @@
 Step 2 is the FastAPI keyword expansion service. It should remain a separate
 container service because it runs asynchronous jobs and calls DataForSEO.
 
-Step 3 now runs inside the main Vercel app through `/api/keywords`, so it does
-not need a separate container image in the normal deployment path.
+Step 3 should be deployed as a separate long-running API when grouping jobs are
+large. Vercel can still host the frontend, but long Claude grouping jobs should
+run outside Vercel serverless limits.
 
 ## Build And Push
 
@@ -68,5 +69,8 @@ Set this in Vercel:
 VITE_STEP2_API_BASE_URL=https://STEP2_SERVICE_URL
 ```
 
-Do not set `VITE_STEP3_API_BASE_URL` unless you intentionally want to point
-Step 3 to an external API. The default internal path is `/api/keywords`.
+If Step 3 is deployed as an external API, also set:
+
+```bash
+VITE_STEP3_API_BASE_URL=https://STEP3_SERVICE_URL/api/keywords
+```

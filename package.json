@@ -11,7 +11,8 @@
     "preview": "vite preview",
     "clean": "rm -rf dist",
     "lint": "tsc --noEmit",
-    "docker:step2:push": "scripts/push-step2-dockerhub.sh"
+    "docker:step2:push": "scripts/push-step2-dockerhub.sh",
+    "docker:step3:push": "scripts/push-step3-dockerhub.sh"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.80.0",
