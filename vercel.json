@@ -8,6 +8,7 @@
     }
   },
   "rewrites": [
+    { "source": "/api/keywords/(grouping-.*)", "destination": "http://srv934175.hstgr.cloud:8011/api/keywords/$1" },
     { "source": "/api/(.*)", "destination": "/api/$1" },
     { "source": "/((?!api/).*)", "destination": "/index.html" }
   ],
